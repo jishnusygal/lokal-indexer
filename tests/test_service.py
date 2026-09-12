@@ -1,0 +1,131 @@
+import asyncio
+import re
+from datetime import datetime, timezone
+from xml.etree import ElementTree as ET
+import bencodepy
+import pytest
+from sqlalchemy import select
+import config
+import main
+import scraper
+from models import Release, ScraperLog, Setting
+from torznab import NS
+
+
+def admin_form(client, path):
+    auth = ('admin', (path / 'admin-password').read_text())
+    page = client.get('/settings', auth=auth)
+    assert page.status_code == 200
+    token = re.search(r'name="csrf" value="([^"]+)"', page.text)[1]
+    return auth, token
+
+
+def test_admin_settings_csrf_and_schedule(service):
+    client, factory, path = service
+    assert client.get('/health').json() == {'status': 'ok'}
+    assert client.get('/settings').status_code == 401
+    auth, token = admin_form(client, path)
+    assert client.post('/settings', auth=auth, data={'sync_interval': '2'}).status_code == 403
+    response = client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '2', 'api_key': 'x' * 32})
+    assert response.status_code == 200
+    assert config.settings()['api_key'] == 'x' * 32
+    assert main.app.state.scheduler.get_job('scrape').trigger.interval.total_seconds() == 120
+    assert client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '0'}).status_code == 422
+    assert config.settings()['sync_interval'] == '2'
+    config.seed()
+    assert config.settings()['api_key'] == 'x' * 32
+    assert client.post('/sync', auth=auth, data={'csrf': token}, follow_redirects=False).status_code == 303
+
+
+def test_api_filters_xml_pagination_download(service):
+    client, factory, path = service
+    key = config.settings()['api_key']
+    assert client.get('/api').status_code == 401
+    caps = ET.fromstring(client.get('/api', params={'t': 'caps', 'apikey': key}).content)
+    assert caps.find('searching/tv-search').get('supportedParams') == 'q,season,ep'
+    torrent = bencodepy.encode({b'info': {b'name': b'example', b'length': 42, b'piece length': 16384, b'pieces': b'x' * 20}})
+    digest, size = scraper.torrent_metadata(torrent)
+    filename = scraper.save_torrent(digest, torrent)
+    with factory.begin() as session:
+        session.add(Release(id=digest, title='A & B.S01E02.100%', category='tv', size=size,
+                            pub_date=datetime.now(timezone.utc), season=1, episode=2, torrent_file_path=filename))
+        session.add(Release(id='b' * 40, title='Movie', category='movie', size=12,
+                            pub_date=datetime.now(timezone.utc), imdb_id='1234567', magnet_uri='magnet:?xt=urn:btih:' + 'b' * 40))
+    params = {'t': 'tvsearch', 'apikey': key, 'season': 1, 'ep': 2, 'q': '100%', 'cat': '5000', 'limit': 1}
+    root = ET.fromstring(client.get('/api', params=params).content)
+    assert root.find('channel/item/title').text == 'A & B.S01E02.100%'
+    assert root.find(f'channel/{{{NS}}}response').get('total') == '1'
+    url = root.find('channel/item/enclosure').get('url')
+    assert client.get(url).content == torrent
+    assert client.get(f'/download/{digest}').status_code == 401
+    root = ET.fromstring(client.get('/api', params={**params, 'offset': 1}).content)
+    assert root.find('channel/item') is None
+    assert root.find(f'channel/{{{NS}}}response').get('total') == '1'
+    root = ET.fromstring(client.get('/api', params={'apikey': key, 't': 'movie', 'imdbid': 'tt1234567'}).content)
+    assert root.find('channel/item/enclosure').get('url').startswith('magnet:')
+    assert ET.fromstring(client.get('/api', params={'apikey': key, 'limit': '-1'}).content).tag == 'error'
+    with factory.begin() as session:
+        session.get(Release, digest).torrent_file_path = '../admin-password'
+    assert client.get(f'/download/{digest}', params={'apikey': key}).status_code == 404
+
+
+def test_failure_notification_and_overlap(service, monkeypatch):
+    _, factory, _ = service
+    alerts = []
+    with factory.begin() as session:
+        session.get(Setting, 'target_url').value = 'https://example.test'
+    async def fail(values):
+        raise ValueError('secret should not be logged')
+    monkeypatch.setattr(scraper, 'scrape', fail)
+    monkeypatch.setattr(scraper, 'notify_failure', alerts.append)
+    worker = scraper.ScraperWorker()
+    asyncio.run(worker.run())
+    with factory() as session:
+        log = session.scalar(select(ScraperLog))
+        assert log.status == 'failure'
+        assert 'secret' not in log.error_message
+    assert len(alerts) == 1
+    async def overlap():
+        async with worker.lock:
+            await worker.run()
+    asyncio.run(overlap())
+    assert len(alerts) == 1
+
+
+@pytest.mark.parametrize('text,expected', [('1 GiB', 1073741824), ('1.5 MB', 1500000), ('42', 42)])
+def test_sizes(text, expected):
+    assert scraper.parse_size(text) == expected
+
+
+def test_invalid_torrent_and_magnet():
+    with pytest.raises(Exception):
+        scraper.torrent_metadata(b'<html>Login required</html>')
+    with pytest.raises(ValueError):
+        scraper.magnet_hash('magnet:?xt=urn:btih:nope')
+
+
+def test_notifier_reads_dynamic_credentials(service, monkeypatch):
+    import notifier
+    import requests
+    _, factory, _ = service
+    calls = []
+    class OK:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {'ok': True}
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return OK()
+    monkeypatch.setattr(notifier.requests, 'post', post)
+    assert notifier.notify_failure('No credentials') is False
+    with factory.begin() as session:
+        session.get(Setting, 'telegram_bot_token').value = 'example-token'
+        session.get(Setting, 'telegram_chat_id').value = '-123'
+    assert notifier.notify_failure('Failed [source]!') is True
+    assert calls[0][1]['json']['chat_id'] == '-123'
+    assert calls[0][1]['json']['text'].endswith(r'Failed \[source\]\!')
+    def fail(*args, **kwargs):
+        raise requests.ConnectionError('private token')
+    monkeypatch.setattr(notifier.requests, 'post', fail)
+    assert notifier.notify_failure('Failure') is False

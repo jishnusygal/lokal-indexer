@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lokal · Settings</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#172c32;background:#edf2f1}body{max-width:980px;margin:40px auto;padding:0 20px}h1{font-size:2.4rem;margin-bottom:6px}p{line-height:1.6;color:#40565b}form,.panel{background:white;padding:28px;border:1px solid #cbd8d5;border-radius:10px;margin:24px 0}fieldset{border:0;padding:0;margin:0 0 26px}legend{font-size:1.2rem;font-weight:650;margin-bottom:16px}label{display:block;font-weight:600;margin:16px 0 6px}input:not([type=checkbox]){box-sizing:border-box;width:100%;padding:11px;border:1px solid #889c99;border-radius:5px;font:inherit}small{display:block;color:#40565b;margin-top:6px}button{background:#146455;color:white;border:0;border-radius:5px;padding:12px 22px;font:inherit;cursor:pointer}button:hover{background:#0c493e}input:focus,button:focus{outline:3px solid #c88e16;outline-offset:2px}code{overflow-wrap:anywhere}.notice{padding:12px;background:#d8f1e5;color:#164e3c}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;text-align:left;font-size:.9rem}th,td{padding:12px 8px;border-bottom:1px solid #dce4e2}caption{text-align:left;font-size:1.2rem;font-weight:650;padding-bottom:16px}.failure{color:#a62828}
+</style>
+</head>
+<body>
+<header><h1>Lokal Indexer</h1><p>Local release cache for Sonarr &amp; Radarr · {{ count }} releases · {{ 'Sync running' if running else 'Ready' }}</p></header>
+{% if saved %}<p class="notice" role="status">Settings saved. The sync schedule has been updated.</p>{% endif %}
+<form action="/settings" method="post">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<fieldset><legend>Connection</legend>
+<p>Current API key: <code>{{ values.api_key }}</code></p>
+<label for="api_key">Replace API key</label><input id="api_key" name="api_key" type="password" autocomplete="new-password" minlength="16" maxlength="256"><small>Leave blank to keep the current key.</small>
+<label for="target_url">Target URL</label><input id="target_url" name="target_url" type="url" value="{{ values.target_url }}"><small>Leave empty to pause scraping. Configure selectors below for this page.</small>
+<label for="public_url">Public service URL</label><input id="public_url" name="public_url" type="url" value="{{ values.public_url }}" placeholder="http://localhost:8000"><small>Address reachable by Sonarr, Radarr and your download client. Used for torrent download links.</small>
+<label for="sync_interval">Sync interval (minutes)</label><input id="sync_interval" name="sync_interval" type="number" min="1" max="10080" value="{{ values.sync_interval }}" required>
+</fieldset>
+<fieldset><legend>Telegram failure alerts</legend>
+<label for="telegram_bot_token">Bot token</label><input id="telegram_bot_token" name="telegram_bot_token" type="password" autocomplete="new-password"><small>{{ 'Token configured. Leave blank to retain it.' if values.telegram_bot_token else 'No token configured.' }}</small>
+<label for="telegram_chat_id">Chat ID</label><input id="telegram_chat_id" name="telegram_chat_id" value="{{ values.telegram_chat_id }}">
+<label><input type="checkbox" name="clear_telegram" value="1"> Disable Telegram and clear credentials</label>
+</fieldset>
+<fieldset><legend>Scraping adapter</legend><p>CSS selectors are evaluated within each release row. Each row needs a title and a torrent or magnet link. Pagination selectors are evaluated on the whole page.</p>
+{% for key, label in [('row_selector','Release row'),('title_selector','Title'),('torrent_selector','Torrent link'),('magnet_selector','Magnet link'),('size_selector','Size'),('date_selector','Publication date'),('next_selector','Next page link')] %}
+<label for="{{ key }}">{{ label }}</label><input id="{{ key }}" name="{{ key }}" value="{{ values[key] }}" {% if key in ['row_selector','title_selector'] %}required{% endif %}>
+{% endfor %}
+<label for="max_pages">Maximum pages per sync</label><input id="max_pages" name="max_pages" type="number" min="1" max="100" value="{{ values.max_pages }}" required>
+</fieldset><button type="submit">Save settings</button>
+</form>
+<form action="/sync" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Sync now</button><small>Refresh this page to see results. A blank target URL leaves the worker idle.</small></form>
+<section class="panel table-wrap"><table><caption>Recent syncs (UTC)</caption><thead><tr><th>Time</th><th>Status</th><th>Added</th><th>Details</th></tr></thead><tbody>
+{% for log in logs %}<tr><td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td><td class="{{ log.status }}">{{ log.status }}</td><td>{{ log.items_added }}</td><td>{{ log.error_message or 'Completed' }}</td></tr>
+{% else %}<tr><td colspan="4">No syncs yet. Save your target and selectors, then run a sync.</td></tr>{% endfor %}
+</tbody></table></section>
+</body></html>

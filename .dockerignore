@@ -1,0 +1,11 @@
+.git
+.qodo
+.venv
+__pycache__
+.pytest_cache
+data
+torrents
+tests
+check_cf.py
+debug_page.png
+*.pyc

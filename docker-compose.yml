@@ -1,0 +1,19 @@
+services:
+  lokal-indexer:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - indexer-data:/app/data
+      - torrent-cache:/app/torrents
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 16m
+    shm_size: 256mb
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  indexer-data:
+  torrent-cache:
