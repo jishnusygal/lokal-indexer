@@ -1,4 +1,4 @@
-"""Configurable CSS adapter: one release per row, optional same-origin pagination."""
+"""Configurable CSS adapter: one release per row, or listing with detail pages."""
 import asyncio
 import base64
 import hashlib
@@ -24,15 +24,23 @@ class ScrapeError(ValueError):
     """A safe, actionable error message suitable for logs and notifications."""
 
 
-
 def parse_size(value):
-    match = re.fullmatch(r'\s*([\d,.]+)\s*([KMGTPE]?i?B)?\s*', value, re.I)
-    if not match:
-        raise ScrapeError('Invalid release size; use bytes or a unit such as GiB.')
-    number, unit = match.groups()
-    unit = (unit or 'B').upper()
-    power = 'BKMGTPE'.index(unit[0])
-    return int(float(number.replace(',', '')) * (1024 if 'I' in unit else 1000) ** power)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        match = re.fullmatch(r'\s*([\d,.]+)\s*([KMGTPE]?i?B)?\s*', value, re.I)
+        if match:
+            number, unit = match.groups()
+            unit = (unit or 'B').upper()
+            power = 'BKMGTPE'.index(unit[0])
+            return int(float(number.replace(',', '')) * (1024 if 'I' in unit else 1000) ** power)
+        submatch = re.search(r'\b([\d,.]+)\s*([KMGTPE]i?B)\b', value, re.I)
+        if submatch:
+            number, unit = submatch.groups()
+            unit = unit.upper()
+            power = 'BKMGTPE'.index(unit[0])
+            return int(float(number.replace(',', '')) * (1024 if 'I' in unit else 1000) ** power)
+    raise ScrapeError('Invalid release size; use bytes or a unit such as GiB.')
 
 
 def magnet_hash(uri):
@@ -46,6 +54,12 @@ def magnet_hash(uri):
             if re.fullmatch(r'[A-Z2-7a-z]{32}', digest):
                 return base64.b32decode(digest.upper()).hex()
     raise ScrapeError('Magnet must contain a valid BitTorrent v1 info hash.')
+
+
+def magnet_params(uri):
+    if not uri or urlsplit(uri).scheme != 'magnet':
+        return {}
+    return parse_qs(urlsplit(uri).query)
 
 
 def torrent_metadata(body):
@@ -100,11 +114,203 @@ async def field(row, selector, attribute=None):
     return ((await node.get_attribute(attribute) if attribute else await node.inner_text()) or '').strip()
 
 
+async def download_torrent(context, torrent_url):
+    download = await context.request.get(torrent_url, timeout=60000)
+    try:
+        if not download.ok or int(download.headers.get('content-length', '0')) > MAX_TORRENT_BYTES:
+            raise ScrapeError('Torrent download failed or exceeds 10 MiB.')
+        body = await download.body()
+        torrent_digest, size = torrent_metadata(body)
+        path = save_torrent(torrent_digest, body)
+        return torrent_digest, size, path
+    finally:
+        await download.dispose()
+
+
+def merge_release(releases, rel):
+    if not rel:
+        return
+    digest = rel['id']
+    if digest in releases:
+        existing = releases[digest]
+        if not existing.get('torrent_file_path') and rel.get('torrent_file_path'):
+            existing['torrent_file_path'] = rel['torrent_file_path']
+        if not existing.get('magnet_uri') and rel.get('magnet_uri'):
+            existing['magnet_uri'] = rel['magnet_uri']
+    else:
+        releases[digest] = rel
+
+
+async def resolve_size(row, values, magnet, title, fallback_title):
+    raw_size = await row.get_attribute('data-size') or await field(row, values.get('size_selector'))
+    if raw_size:
+        return parse_size(raw_size)
+    if magnet:
+        m_params = magnet_params(magnet)
+        if m_params.get('xl'):
+            return int(m_params['xl'][0])
+    try:
+        parent = row.locator('xpath=..')
+        if await parent.count():
+            p_size = await parent.first.get_attribute('data-size')
+            if p_size:
+                return parse_size(p_size)
+    except Exception:
+        pass
+    for text in (title, fallback_title):
+        if text:
+            try:
+                return parse_size(text)
+            except Exception:
+                pass
+    try:
+        parent = row.locator('xpath=..')
+        if await parent.count():
+            p_text = await parent.first.inner_text()
+            if p_text:
+                return parse_size(p_text)
+    except Exception:
+        pass
+    raise ScrapeError('Release has neither a valid size attribute nor an xl parameter in magnet.')
+
+
+async def extract_release(row, context, page, values, fallback_title='', fallback_date=None):
+    title = await field(row, values.get('title_selector'))
+    magnet = await field(row, values.get('magnet_selector') or 'a[href^="magnet:"]', 'href')
+    if not magnet and (await row.get_attribute('href') or '').startswith('magnet:'):
+        magnet = await row.get_attribute('href')
+    magnet = magnet or None
+
+    torrent_url = await field(row, values.get('torrent_selector'), 'href')
+    if not torrent_url and (await row.get_attribute('href') or '').endswith('.torrent'):
+        torrent_url = await row.get_attribute('href')
+
+    digest = magnet_hash(magnet) if magnet else None
+    path, size = None, None
+
+    if torrent_url:
+        torrent_url = http_url(urljoin(page.url, torrent_url))
+        torrent_digest, size, path = await download_torrent(context, torrent_url)
+        if digest and digest != torrent_digest:
+            raise ScrapeError('Torrent and magnet hashes do not match.')
+        digest = torrent_digest
+    elif magnet:
+        size = await resolve_size(row, values, magnet, title, fallback_title)
+    else:
+        raise ScrapeError('Release has neither a torrent link nor a valid magnet.')
+
+    if not title:
+        if magnet and magnet_params(magnet).get('dn'):
+            title = magnet_params(magnet)['dn'][0].strip()
+        elif fallback_title:
+            title = fallback_title.strip()
+        else:
+            title = (await row.inner_text()).strip()
+
+    if not title or len(title) > 1000:
+        raise ScrapeError('Release has a missing or oversized title.')
+
+    match = re.search(r'(?i)\bS(\d{1,3})(?:E(\d{1,4}))?\b', title)
+    season = int(match[1]) if match else None
+    episode = int(match[2]) if match and match[2] else None
+    category = await row.get_attribute('data-category') or ('tv' if match else 'movie')
+    if category not in ('movie', 'tv'):
+        raise ScrapeError('Release category must be movie or tv.')
+
+    date_text = await field(row, values.get('date_selector'), 'datetime')
+    if date_text:
+        date = datetime.fromisoformat(date_text.replace('Z', '+00:00'))
+    elif fallback_date:
+        date = fallback_date
+    else:
+        date = utcnow()
+    date = date.replace(tzinfo=timezone.utc) if date.tzinfo is None else date.astimezone(timezone.utc)
+
+    imdb = await row.get_attribute('data-imdb')
+    if imdb:
+        if not re.fullmatch(r'(?:tt)?\d{7,10}', imdb):
+            raise ScrapeError('Invalid IMDb ID.')
+        imdb = imdb.removeprefix('tt')
+
+    return dict(id=digest, title=title, category=category, size=size,
+                pub_date=date, magnet_uri=magnet, torrent_file_path=path,
+                imdb_id=imdb, season=season, episode=episode)
+
+
+async def scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases):
+    detail_page = await context.new_page()
+    try:
+        response = await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=60000)
+        if response is None or response.status >= 400:
+            raise ScrapeError('Detail page returned an unsuccessful HTTP response.')
+        date = topic_date
+        if not date:
+            d_date_text = await field(detail_page, values.get('date_selector'), 'datetime')
+            if d_date_text:
+                date = datetime.fromisoformat(d_date_text.replace('Z', '+00:00'))
+
+        detail_row_sel = values.get('detail_row_selector')
+        if detail_row_sel:
+            sub_rows = detail_page.locator(detail_row_sel)
+            for idx in range(await sub_rows.count()):
+                rel = await extract_release(sub_rows.nth(idx), context, detail_page, values, topic_title, date)
+                merge_release(releases, rel)
+        else:
+            mag_sel = values.get('magnet_selector') or 'a[href^="magnet:"]'
+            tor_sel = values.get('torrent_selector') or 'a[href$=".torrent"]'
+            downloads = detail_page.locator(f'{mag_sel}, {tor_sel}')
+            d_count = await downloads.count()
+            if d_count == 0 and await detail_page.locator(values['row_selector']).count() > 0:
+                d_rows = detail_page.locator(values['row_selector'])
+                for idx in range(await d_rows.count()):
+                    rel = await extract_release(d_rows.nth(idx), context, detail_page, values, topic_title, date)
+                    merge_release(releases, rel)
+            else:
+                for idx in range(d_count):
+                    rel = await extract_release(downloads.nth(idx), context, detail_page, values, topic_title, date)
+                    merge_release(releases, rel)
+    finally:
+        await detail_page.close()
+
+
+async def scrape_page_releases(page, context, values, releases, seen_detail_urls, origin):
+    await page.locator(values['row_selector']).first.wait_for(state='attached')
+    rows = page.locator(values['row_selector'])
+    count = await rows.count()
+    if count == 0 or count > MAX_ROWS:
+        raise ScrapeError('Zero release rows found, or page exceeds the 2000-row limit.')
+
+    detail_sel = values.get('detail_selector')
+    if detail_sel:
+        for idx in range(count):
+            row = rows.nth(idx)
+            detail_href = await field(row, detail_sel, 'href')
+            if not detail_href and await row.get_attribute('href'):
+                detail_href = await row.get_attribute('href')
+            if not detail_href:
+                continue
+            detail_url = http_url(urljoin(page.url, detail_href))
+            if urlsplit(detail_url).netloc != origin:
+                raise ScrapeError('Pagination must remain on the configured host.')
+            if detail_url in seen_detail_urls:
+                continue
+            seen_detail_urls.add(detail_url)
+            topic_title = await field(row, values.get('title_selector'))
+            topic_date_text = await field(row, values.get('date_selector'), 'datetime')
+            topic_date = datetime.fromisoformat(topic_date_text.replace('Z', '+00:00')) if topic_date_text else None
+            await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
+    else:
+        for idx in range(count):
+            rel = await extract_release(rows.nth(idx), context, page, values)
+            merge_release(releases, rel)
+
+
 async def scrape(values):
     target = http_url(values['target_url'])
     origin = urlsplit(target).netloc
     releases = {}
     seen_pages = set()
+    seen_detail_urls = set()
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
         try:
@@ -118,56 +324,8 @@ async def scrape(values):
                 response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
                 if response is None or response.status >= 400:
                     raise ScrapeError('Target returned an unsuccessful HTTP response.')
-                await page.locator(values['row_selector']).first.wait_for(state='attached')
-                rows = page.locator(values['row_selector'])
-                count = await rows.count()
-                if count == 0 or count > MAX_ROWS:
-                    raise ScrapeError('Zero release rows found, or page exceeds the 2000-row limit.')
-                for index in range(count):
-                    row = rows.nth(index)
-                    title = await field(row, values['title_selector'])
-                    if not title or len(title) > 1000:
-                        raise ScrapeError('Release has a missing or oversized title.')
-                    magnet = await field(row, values['magnet_selector'], 'href') or None
-                    torrent_url = await field(row, values['torrent_selector'], 'href')
-                    digest = magnet_hash(magnet) if magnet else None
-                    path = None
-                    if torrent_url:
-                        torrent_url = http_url(urljoin(page.url, torrent_url))
-                        download = await context.request.get(torrent_url, timeout=60000)
-                        try:
-                            if not download.ok or int(download.headers.get('content-length', '0')) > MAX_TORRENT_BYTES:
-                                raise ScrapeError('Torrent download failed or exceeds 10 MiB.')
-                            body = await download.body()
-                            torrent_digest, size = torrent_metadata(body)
-                            if digest and digest != torrent_digest:
-                                raise ScrapeError('Torrent and magnet hashes do not match.')
-                            digest = torrent_digest
-                            path = save_torrent(digest, body)
-                        finally:
-                            await download.dispose()
-                    elif magnet:
-                        size = parse_size(await row.get_attribute('data-size') or await field(row, values['size_selector']))
-                    else:
-                        raise ScrapeError('Release has neither a torrent link nor a valid magnet.')
-                    match = re.search(r'(?i)\bS(\d{1,3})(?:E(\d{1,4}))?\b', title)
-                    season = int(match[1]) if match else None
-                    episode = int(match[2]) if match and match[2] else None
-                    category = await row.get_attribute('data-category') or ('tv' if match else 'movie')
-                    if category not in ('movie', 'tv'):
-                        raise ScrapeError('Release category must be movie or tv.')
-                    date_text = await field(row, values['date_selector'], 'datetime')
-                    date = datetime.fromisoformat(date_text.replace('Z', '+00:00')) if date_text else utcnow()
-                    date = date.replace(tzinfo=timezone.utc) if date.tzinfo is None else date.astimezone(timezone.utc)
-                    imdb = await row.get_attribute('data-imdb')
-                    if imdb:
-                        if not re.fullmatch(r'(?:tt)?\d{7,10}', imdb):
-                            raise ScrapeError('Invalid IMDb ID.')
-                        imdb = imdb.removeprefix('tt')
-                    releases[digest] = dict(id=digest, title=title, category=category, size=size,
-                                            pub_date=date, magnet_uri=magnet, torrent_file_path=path,
-                                            imdb_id=imdb, season=season, episode=episode)
-                next_link = await field(page, values['next_selector'], 'href')
+                await scrape_page_releases(page, context, values, releases, seen_detail_urls, origin)
+                next_link = await field(page, values.get('next_selector'), 'href')
                 if not next_link:
                     break
                 target = http_url(urljoin(page.url, next_link))

@@ -7,6 +7,7 @@ from models import Setting
 DEFAULTS = {
     'target_url': '', 'public_url': '', 'telegram_bot_token': '', 'telegram_chat_id': '', 'webhook_url': '',
     'sync_interval': '60', 'row_selector': '.release', 'title_selector': '.title',
+    'detail_selector': '', 'detail_row_selector': '',
     'torrent_selector': 'a[href$=".torrent"]', 'magnet_selector': 'a[href^="magnet:"]',
     'size_selector': '.size', 'date_selector': 'time', 'next_selector': '', 'max_pages': '5',
 }
