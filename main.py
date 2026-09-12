@@ -106,25 +106,46 @@ def settings_page(request: Request):
     with SessionLocal() as session:
         logs = session.scalars(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(20)).all()
         count = session.scalar(select(func.count()).select_from(Release))
+    service_url = values['public_url'] or str(request.base_url).rstrip('/')
+    sonarr_key = values.get('sonarr_api_key', values['api_key'])
+    radarr_key = values.get('radarr_api_key', values['api_key'])
     return templates.TemplateResponse(request=request, name='settings.html', context={
         'values': values, 'logs': logs, 'count': count, 'saved': request.query_params.get('saved'),
         'csrf': request.app.state.signer.dumps(secrets.token_urlsafe(16)),
         'running': request.app.state.worker.lock.locked(),
+        'service_url': service_url,
+        'sonarr_base_url': f'{service_url}/api',
+        'radarr_base_url': f'{service_url}/api',
+        'sonarr_caps_url': f'{service_url}/api?t=caps&apikey={sonarr_key}',
+        'radarr_caps_url': f'{service_url}/api?t=caps&apikey={radarr_key}',
+        'sonarr_url': f'{service_url}/api?t=tvsearch&apikey={sonarr_key}',
+        'radarr_url': f'{service_url}/api?t=movie&apikey={radarr_key}',
+        'last_log': logs[0] if logs else None,
     })
 
 
 @app.post('/settings', dependencies=[Depends(admin)])
 async def save_settings(request: Request):
-    form = await request.form(max_fields=30)
+    form = await request.form(max_fields=40)
     check_csrf(request, str(form.get('csrf', '')))
     current = settings()
-    values = {key: str(form.get(key, current[key])).strip() for key in [*DEFAULTS, 'api_key']}
+    keys = [*DEFAULTS, 'api_key', 'sonarr_api_key', 'radarr_api_key']
+    values = {key: str(form.get(key, current.get(key, ''))).strip() for key in keys}
     # Blank secret fields retain the existing value; clearing Telegram is explicit.
-    for key in ('api_key', 'telegram_bot_token'):
+    for key in ('api_key', 'sonarr_api_key', 'radarr_api_key', 'telegram_bot_token'):
         if not values[key]:
-            values[key] = current[key]
+            values[key] = current.get(key, '')
+    if not values['api_key']:
+        values['api_key'] = values['sonarr_api_key']
     if form.get('clear_telegram'):
         values['telegram_bot_token'] = values['telegram_chat_id'] = ''
+    new_password = str(form.get('new_admin_password', ''))
+    confirm_password = str(form.get('confirm_admin_password', ''))
+    if new_password or confirm_password:
+        if new_password != confirm_password:
+            raise HTTPException(422, 'Admin password confirmation does not match.')
+        if len(new_password) < 12:
+            raise HTTPException(422, 'Admin password must be at least 12 characters.')
     try:
         if any(len(value) > 4096 for value in values.values()):
             raise ValueError('Setting exceeds 4096 characters.')
@@ -134,6 +155,12 @@ async def save_settings(request: Request):
     with SessionLocal.begin() as session:
         for key, value in values.items():
             session.merge(Setting(key=key, value=value))
+    if new_password:
+        credential = DATA_DIR / 'admin-password'
+        credential.write_text(new_password)
+        os.chmod(credential, 0o600)
+        request.app.state.admin_password = new_password
+        request.app.state.signer = URLSafeTimedSerializer(new_password, salt='settings-csrf')
     schedule(request.app, values['sync_interval'])
     return RedirectResponse('/settings?saved=1', status_code=303)
 
@@ -147,9 +174,16 @@ async def sync_now(request: Request):
     return RedirectResponse('/settings', status_code=303)
 
 
-def authorized(request):
+def authorized(request, kind=None):
     key = request.query_params.get('apikey', '')
-    return bool(key) and hmac.compare_digest(key.encode(), settings()['api_key'].encode())
+    values = settings()
+    if kind == 'tvsearch':
+        allowed = [values.get('sonarr_api_key', values.get('api_key', ''))]
+    elif kind == 'movie':
+        allowed = [values.get('radarr_api_key', values.get('api_key', ''))]
+    else:
+        allowed = [values.get('sonarr_api_key', ''), values.get('radarr_api_key', ''), values.get('api_key', '')]
+    return bool(key) and any(secret and hmac.compare_digest(key.encode(), secret.encode()) for secret in allowed)
 
 
 def xml_response(body, status=200):
@@ -158,10 +192,10 @@ def xml_response(body, status=200):
 
 @app.get('/api')
 def api(request: Request):
-    if not authorized(request):
-        return xml_response(torznab.error(100, 'Incorrect API key'), 401)
     params = request.query_params
     kind = params.get('t', 'search')
+    if not authorized(request, kind):
+        return xml_response(torznab.error(100, 'Incorrect API key'), 401)
     if kind == 'caps':
         return xml_response(torznab.caps())
     if kind not in ('search', 'movie', 'tvsearch'):
@@ -193,7 +227,8 @@ def api(request: Request):
             total = session.scalar(select(func.count()).select_from(Release).where(*conditions))
             releases = session.scalars(select(Release).where(*conditions).order_by(Release.pub_date.desc(), Release.id).offset(offset).limit(limit)).all()
         values = settings()
-        return xml_response(torznab.feed(releases, total, offset, values['public_url'] or str(request.base_url).rstrip('/'), values['api_key']))
+        api_key = values.get('radarr_api_key' if kind == 'movie' else 'sonarr_api_key', values['api_key'])
+        return xml_response(torznab.feed(releases, total, offset, values['public_url'] or str(request.base_url).rstrip('/'), api_key))
     except ValueError:
         return xml_response(torznab.error(201, 'Invalid search parameters'))
 

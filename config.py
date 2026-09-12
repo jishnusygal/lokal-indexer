@@ -5,7 +5,7 @@ from database import SessionLocal
 from models import Setting
 
 DEFAULTS = {
-    'target_url': '', 'public_url': '', 'telegram_bot_token': '', 'telegram_chat_id': '',
+    'target_url': '', 'public_url': '', 'telegram_bot_token': '', 'telegram_chat_id': '', 'webhook_url': '',
     'sync_interval': '60', 'row_selector': '.release', 'title_selector': '.title',
     'torrent_selector': 'a[href$=".torrent"]', 'magnet_selector': 'a[href^="magnet:"]',
     'size_selector': '.size', 'date_selector': 'time', 'next_selector': '', 'max_pages': '5',
@@ -17,7 +17,15 @@ def settings():
 
 def seed():
     with SessionLocal.begin() as session:
-        for key, value in {**DEFAULTS, 'api_key': secrets.token_urlsafe(32)}.items():
+        shared_key = session.get(Setting, 'api_key')
+        generated = secrets.token_urlsafe(32)
+        keys = {
+            **DEFAULTS,
+            'api_key': generated,
+            'sonarr_api_key': shared_key.value if shared_key else generated,
+            'radarr_api_key': shared_key.value if shared_key else generated,
+        }
+        for key, value in keys.items():
             if session.get(Setting, key) is None:
                 session.add(Setting(key=key, value=value))
 
@@ -28,9 +36,10 @@ def http_url(value):
     return value
 
 def validate(values):
-    if not 16 <= len(values['api_key']) <= 256:
-        raise ValueError('API key must contain 16–256 characters.')
-    for key in ('target_url', 'public_url'):
+    for key in ('sonarr_api_key', 'radarr_api_key'):
+        if not 16 <= len(values[key]) <= 256:
+            raise ValueError('API keys must contain 16–256 characters.')
+    for key in ('target_url', 'public_url', 'webhook_url'):
         if values[key]:
             http_url(values[key])
     if values['public_url'] and (urlsplit(values['public_url']).query or urlsplit(values['public_url']).fragment):
