@@ -5,6 +5,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -109,17 +110,15 @@ def settings_page(request: Request):
     service_url = values['public_url'] or str(request.base_url).rstrip('/')
     sonarr_key = values.get('sonarr_api_key', values['api_key'])
     radarr_key = values.get('radarr_api_key', values['api_key'])
+    indexer_base_url = f'{service_url}/api'
     return templates.TemplateResponse(request=request, name='settings.html', context={
         'values': values, 'logs': logs, 'count': count, 'saved': request.query_params.get('saved'),
+        'error': request.query_params.get('error'),
         'csrf': request.app.state.signer.dumps(secrets.token_urlsafe(16)),
         'running': request.app.state.worker.lock.locked(),
-        'service_url': service_url,
-        'sonarr_base_url': f'{service_url}/api',
-        'radarr_base_url': f'{service_url}/api',
-        'sonarr_caps_url': f'{service_url}/api?t=caps&apikey={sonarr_key}',
-        'radarr_caps_url': f'{service_url}/api?t=caps&apikey={radarr_key}',
-        'sonarr_url': f'{service_url}/api?t=tvsearch&apikey={sonarr_key}',
-        'radarr_url': f'{service_url}/api?t=movie&apikey={radarr_key}',
+        'indexer_base_url': indexer_base_url,
+        'sonarr_caps_url': f'{indexer_base_url}?t=caps&apikey={sonarr_key}',
+        'radarr_caps_url': f'{indexer_base_url}?t=caps&apikey={radarr_key}',
         'last_log': logs[0] if logs else None,
     })
 
@@ -141,17 +140,17 @@ async def save_settings(request: Request):
         values['telegram_bot_token'] = values['telegram_chat_id'] = ''
     new_password = str(form.get('new_admin_password', ''))
     confirm_password = str(form.get('confirm_admin_password', ''))
-    if new_password or confirm_password:
-        if new_password != confirm_password:
-            raise HTTPException(422, 'Admin password confirmation does not match.')
-        if len(new_password) < 12:
-            raise HTTPException(422, 'Admin password must be at least 12 characters.')
     try:
+        if new_password or confirm_password:
+            if new_password != confirm_password:
+                raise ValueError('Admin password confirmation does not match.')
+            if len(new_password) < 12:
+                raise ValueError('Admin password must be at least 12 characters.')
         if any(len(value) > 4096 for value in values.values()):
             raise ValueError('Setting exceeds 4096 characters.')
         validate(values)
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        return RedirectResponse(f'/settings?error={quote(str(exc))}', status_code=303)
     with SessionLocal.begin() as session:
         for key, value in values.items():
             session.merge(Setting(key=key, value=value))

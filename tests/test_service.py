@@ -30,7 +30,7 @@ def test_admin_settings_csrf_and_schedule(service):
     assert response.status_code == 200
     assert config.settings()['api_key'] == 'x' * 32
     assert main.app.state.scheduler.get_job('scrape').trigger.interval.total_seconds() == 120
-    assert client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '0'}).status_code == 422
+    assert client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '0'}).status_code == 200
     assert config.settings()['sync_interval'] == '2'
     config.seed()
     assert config.settings()['api_key'] == 'x' * 32
