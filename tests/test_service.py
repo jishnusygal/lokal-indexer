@@ -141,6 +141,8 @@ def test_sizes(text, expected):
 @pytest.mark.parametrize('text, expected', [
     ('www.example-source.test - Haiwaan (2026) Hindi HQ PreDVD - x264 - HQ Clean - AAC - 400MB.mkv',
      'Haiwaan (2026) Hindi HQ PreDVD x264 HQ Clean AAC 400MB'),
+    ('Mareechika (2026) TRUE WEB-DL 4K DD+5.1 AAC 9.5GB.mkv',
+     'Mareechika (2026) TRUE WEB DL 4K DD+5.1 AAC 9.5GB'),
     ('Reacher.S04E07.1080p.WEB-DL.mkv', 'Reacher S04E07 1080p WEB DL'),
     ('Movie (2026)', 'Movie (2026)'),
 ])

@@ -206,9 +206,15 @@ def normalize_release_title(title):
     normalized = title.strip()
     normalized = re.sub(r'(?i)^www\.[^\s]+\s*[-|:]\s*', '', normalized)
     normalized = re.sub(r'(?i)\.(?:mkv|mp4|avi|mov|wmv|webm|ts)$', '', normalized)
+    normalized = re.sub(
+        r'(?<![A-Za-z0-9])(\d+)\.(\d{1,2})(?!\d)',
+        r'\1DECIMALPOINTTOKEN\2',
+        normalized,
+    )
     normalized = re.sub(r'[._]+', ' ', normalized)
     normalized = re.sub(r'\s*-\s*', ' ', normalized)
-    return re.sub(r'\s+', ' ', normalized).strip()
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized.replace('DECIMALPOINTTOKEN', '.')
 
 
 async def extract_release(row, context, page, values, fallback_title='', fallback_date=None):
@@ -313,7 +319,7 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
                         merge_release(releases, rel)
                         logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
                 except Exception as e:
-                    logger.debug('Detail row %d failed on %s: %s', idx, detail_url, e)
+                    logger.warning('Detail row %d skipped on %s: %s', idx, detail_url, e)
         else:
             mag_sel = values.get('magnet_selector') or 'a[href^="magnet:"]'
             tor_sel = values.get('torrent_selector') or 'a[href*="attachment.php"], a[href$=".torrent"]'
@@ -328,7 +334,7 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
                             merge_release(releases, rel)
                             logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
                     except Exception as e:
-                        logger.debug('Detail fallback row %d failed on %s: %s', idx, detail_url, e)
+                        logger.warning('Detail fallback row %d skipped on %s: %s', idx, detail_url, e)
             else:
                 for idx in range(d_count):
                     try:
@@ -337,7 +343,7 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
                             merge_release(releases, rel)
                             logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
                     except Exception as e:
-                        logger.debug('Detail download link %d failed on %s: %s', idx, detail_url, e)
+                        logger.warning('Detail download link %d skipped on %s: %s', idx, detail_url, e)
     finally:
         await detail_page.close()
 
@@ -374,9 +380,9 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
             topic_date = datetime.fromisoformat(topic_date_text.replace('Z', '+00:00')) if topic_date_text else None
             try:
                 await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
-            except Exception:
-                # Allow scraping to continue if an individual topic page has issues
-                pass
+            except Exception as err:
+                # Allow scraping to continue if an individual topic page has issues.
+                logger.warning('Detail page skipped on %s: %s', detail_url, err)
     else:
         for idx in range(count):
             rel = await extract_release(rows.nth(idx), context, page, values)
