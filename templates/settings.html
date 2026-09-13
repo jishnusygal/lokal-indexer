@@ -23,6 +23,9 @@
     </div>
     <div class="actions">
       <span class="status"><span class="dot {{ 'running' if running else 'ok' }}"></span>{{ 'Scrape running' if running else 'Ready' }}</span>
+      <form action="/logout" method="post">
+        <button type="submit" class="compact" title="Sign out of the Lokal Indexer dashboard">Sign out</button>
+      </form>
       <form action="/sync" method="post">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button type="submit" title="Trigger a scrape immediately using the currently saved settings">Run Scrape Now</button>

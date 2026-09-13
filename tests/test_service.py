@@ -13,48 +13,64 @@ from torznab import NS
 
 
 def admin_form(client, path):
-    auth = ('admin', (path / 'admin-password').read_text())
-    page = client.get('/settings', auth=auth)
+    login = client.post('/login', data={'username': 'admin', 'password': 'test-admin-password'}, follow_redirects=False)
+    assert login.status_code == 303
+    page = client.get('/settings')
     assert page.status_code == 200
     token = re.search(r'name="csrf" value="([^"]+)"', page.text)[1]
-    return auth, token
+    return token
 
 
 def test_admin_settings_csrf_and_schedule(service):
     client, factory, path = service
     assert client.get('/health').json() == {'status': 'ok'}
-    assert client.get('/settings').status_code == 401
-    auth, token = admin_form(client, path)
-    page = client.get('/settings', auth=auth)
+    response = client.get('/settings', follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/login'
+    token = admin_form(client, path)
+    page = client.get('/settings')
     assert 'data-open-api-key' in page.text
     assert '<script nonce="' in page.text
     assert "script-src 'nonce-" in page.headers['content-security-policy']
-    assert client.post('/settings', auth=auth, data={'sync_interval': '2'}).status_code == 403
-    response = client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '2', 'api_key': 'x' * 32})
+    assert client.post('/settings', data={'sync_interval': '2'}).status_code == 403
+    response = client.post('/settings', data={'csrf': token, 'sync_interval': '2', 'api_key': 'x' * 32})
     assert response.status_code == 200
+    assert (path / 'admin-password').read_text().startswith('scrypt$')
     assert config.settings()['api_key'] == 'x' * 32
     assert main.app.state.scheduler.get_job('scrape').trigger.interval.total_seconds() == 120
-    assert client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '0'}).status_code == 200
+    assert client.post('/settings', data={'csrf': token, 'sync_interval': '0'}).status_code == 200
     assert config.settings()['sync_interval'] == '2'
     config.seed()
     assert config.settings()['api_key'] == 'x' * 32
-    assert client.post('/sync', auth=auth, data={'csrf': token}, follow_redirects=False).status_code == 303
+    assert client.post('/sync', data={'csrf': token}, follow_redirects=False).status_code == 303
+    assert client.post('/logout', follow_redirects=False).status_code == 303
+    assert client.get('/settings', follow_redirects=False).headers['location'] == '/login'
 
 
 def test_api_key_can_be_regenerated_and_revoked(service):
     client, _, path = service
-    auth, token = admin_form(client, path)
+    token = admin_form(client, path)
     original = config.settings()['api_key']
-    response = client.post('/account/api-key', auth=auth, data={'csrf': token, 'action': 'regenerate'}, follow_redirects=False)
+    response = client.post('/account/api-key', data={'csrf': token, 'action': 'regenerate'}, follow_redirects=False)
     assert response.status_code == 303
     generated = config.settings()['api_key']
     assert generated != original and len(generated) >= 32
     assert client.get('/api', params={'t': 'caps', 'apikey': original}).status_code == 401
     assert client.get('/api', params={'t': 'caps', 'apikey': generated}).status_code == 200
-    response = client.post('/account/api-key', auth=auth, data={'csrf': token, 'action': 'revoke'}, follow_redirects=False)
+    response = client.post('/account/api-key', data={'csrf': token, 'action': 'revoke'}, follow_redirects=False)
     assert response.status_code == 303
     assert config.settings()['api_key'] == ''
     assert client.get('/api', params={'t': 'caps', 'apikey': generated}).status_code == 401
+
+
+def test_first_run_setup_creates_session(setup_service):
+    client, _, path = setup_service
+    response = client.get('/settings', follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/setup'
+    response = client.post('/setup', data={'password': 'setup-password-123', 'confirmation': 'setup-password-123'}, follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/settings'
+    assert client.get('/settings').status_code == 200
+    assert (path / 'admin-password').read_text().startswith('scrypt$')
+    assert client.get('/setup', follow_redirects=False).headers['location'] == '/login'
 
 
 def test_api_filters_xml_pagination_download(service):

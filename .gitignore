@@ -4,4 +4,6 @@ __pycache__/
 *.pyc
 data/
 torrents/
+config/**/.env
+config/lokal-indexer/data/
 .coverage

@@ -2,10 +2,13 @@ services:
   lokal-indexer:
     build: .
     ports:
-      - "8000:8000"
+      - "${LOKAL_PORT:-8000}:8000"
+    env_file:
+      - path: ${LOKAL_ENV_FILE:-./config/lokal-indexer/.env}
+        required: false
     volumes:
-      - indexer-data:/app/data
-      - torrent-cache:/app/torrents
+      - ${LOKAL_DATA_DIR:-./config/lokal-indexer/data}:/app/data
+      - ${LOKAL_TORRENT_DIR:-./torrents}:/app/torrents
     init: true
     restart: unless-stopped
     stop_grace_period: 16m
@@ -14,6 +17,3 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-volumes:
-  indexer-data:
-  torrent-cache:

@@ -1,17 +1,17 @@
 # Lokal Indexer
 
-A single-container FastAPI Torznab indexer with SQLite persistence, a Chromium scraper, cached torrent files, and Telegram failure alerts. Configuration lives in SQLite; no environment variables are required.
+A single-container FastAPI Torznab indexer with SQLite persistence, a Chromium scraper, cached torrent files, and Telegram failure alerts. Runtime configuration lives in SQLite; the initial admin password is supplied through a private environment variable.
 
 ## Run
 
 ```sh
+mkdir -p config/lokal-indexer/data
 docker compose up -d --build
-docker compose exec lokal-indexer cat /app/data/admin-password
 ```
 
-Open **http://localhost:8000/settings**. Sign in as `admin` using the generated password printed by the second command. This password is separate from the Torznab API key and persists in the data volume. Copy the generated API key from the settings page, configure the target URL and CSS selectors, and click **Save settings**, then **Sync now**. Reload to view results. Sync intervals are in minutes; saving reschedules the next run without restarting. A configured installation also syncs on startup. Empty target URL pauses scraping; an in-flight sync finishes with its original settings.
+Open **http://localhost:8000/setup** on the first run and create the admin password. The setup page is available only until the first account is created. For unattended deployments, copy `config/lokal-indexer/.env.example` to `config/lokal-indexer/.env`, set `LOKAL_ADMIN_PASSWORD`, and start the container. Only a salted `scrypt` hash is stored in `config/lokal-indexer/data`. This password is separate from the Torznab API key and persists in the data volume. Copy the generated API key from the settings page, configure the target URL and CSS selectors, and click **Save settings**, then **Sync now**. Reload to view results. Sync intervals are in minutes; saving reschedules the next run without restarting. A configured installation also syncs on startup. Empty target URL pauses scraping; an in-flight sync finishes with its original settings.
 
-To rotate the admin password, stop the service, replace `admin-password` in the data volume with a strong password (keep ownership UID 10001 and mode 0600), then restart. Treat both volumes as private: SQLite contains API and Telegram credentials. Use TLS at a reverse proxy and restrict network access to trusted clients before exposing the service beyond your machine. Access logging is disabled to avoid logging API keys in query strings. Do not enable query-string logging at your proxy.
+To rotate the admin password, use **Settings → Admin Password**. Existing plaintext password files are upgraded to salted `scrypt` hashes on startup. Treat the data and torrent directories as private: SQLite contains API and Telegram credentials. Use TLS at a reverse proxy and restrict network access to trusted clients before exposing the service beyond your machine. Access logging is disabled to avoid logging API keys in query strings. Do not enable query-string logging at your proxy.
 
 ## Sonarr / Radarr
 
@@ -60,7 +60,7 @@ For Telegram, create a bot with BotFather, start a conversation with it (or add 
 
 ## Storage and operations
 
-Named volumes persist `/app/data/indexer.db`, `/app/data/admin-password`, and `/app/torrents`. Use `docker compose down` without `-v` to retain them. Back up both volumes with the container stopped so SQLite WAL and torrent files form a consistent snapshot. Restore together, preserving UID 10001 ownership. Schema tables are created on startup; future schema changes require migrations rather than merely restarting with changed models.
+The default Compose deployment stores SQLite and the hashed admin password in `config/lokal-indexer/data`, and torrent files in `./torrents`. Set `LOKAL_DATA_DIR` and `LOKAL_TORRENT_DIR` in the shell or `.env` to use different host directories. Back up both directories with the container stopped so SQLite WAL and torrent files form a consistent snapshot. Restore them together, preserving UID 10001 ownership. Schema tables are created on startup; future schema changes require migrations rather than merely restarting with changed models.
 
 The container runs as UID 10001 with one Uvicorn worker. **Do not scale replicas or worker count**: the APScheduler and scrape lock are process-local. `/health` checks process/database availability; sync failures are reported separately in the UI. Chromium is installed with native Debian dependencies during the multi-stage build. The generous shutdown grace period permits an active bounded scrape to finish.
 
@@ -77,6 +77,6 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
-Run from the repository root. Local data uses `./data/indexer.db` and `./torrents`. Tests use isolated temporary storage and local HTML/HTTP fixtures. They exercise authentication, CSRF, settings persistence, rescheduling, XML/search semantics, torrent handling, scrape failure notifications, and a real headless-browser scrape. No live forum or Telegram credentials are needed.
+Run from the repository root. Local data uses `config/lokal-indexer/data/indexer.db` and `./torrents`. Tests use isolated temporary storage and local HTML/HTTP fixtures. They exercise authentication, CSRF, settings persistence, rescheduling, XML/search semantics, torrent handling, scrape failure notifications, and a real headless-browser scrape. No live forum or Telegram credentials are needed.
 
 Protocol reference: [Torznab specification](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html).

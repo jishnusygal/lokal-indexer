@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Sign in | Lokal Indexer</title>
+{% include "_style.html" %}
+</head>
+<body>
+<main class="auth-shell">
+  <section class="auth-card">
+    <p class="eyebrow">LOKAL INDEXER</p>
+    <h1>Sign in</h1>
+    <p class="muted">Manage your local Torznab indexer.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form action="/login" method="post" class="auth-form">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>

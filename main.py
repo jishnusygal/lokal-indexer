@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
@@ -11,7 +12,6 @@ from urllib.parse import quote
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from sqlalchemy import func, select
@@ -29,14 +29,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger('lokal-indexer')
 
-basic = HTTPBasic()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
+SESSION_COOKIE = 'lokal_session'
+
+PASSWORD_PREFIX = 'scrypt$'
 
 
-def admin(request: Request, credentials: HTTPBasicCredentials = Depends(basic)):
-    if not (hmac.compare_digest(credentials.username.encode(), b'admin') and
-            hmac.compare_digest(credentials.password.encode(), request.app.state.admin_password.encode())):
-        raise HTTPException(401, 'Invalid admin credentials', headers={'WWW-Authenticate': 'Basic realm="Lokal"'})
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+    return f'{PASSWORD_PREFIX}16384$8$1${salt.hex()}${digest.hex()}'
+
+
+def verify_password(password, stored):
+    if not stored.startswith(PASSWORD_PREFIX):
+        return hmac.compare_digest(password.encode(), stored.encode())
+    try:
+        _, n, r, p, salt_hex, digest_hex = stored.split('$')
+        digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex),
+                                n=int(n), r=int(r), p=int(p), dklen=len(bytes.fromhex(digest_hex)))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+
+def session_user(request):
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token or not request.app.state.admin_password_hash:
+        return None
+    try:
+        payload = request.app.state.signer.loads(token, max_age=86400)
+        return payload.get('username') if payload.get('username') == 'admin' else None
+    except BadSignature:
+        return None
+
+
+def admin(request: Request):
+    if not request.app.state.admin_password_hash:
+        raise HTTPException(303, headers={'Location': '/setup'})
+    if session_user(request) != 'admin':
+        raise HTTPException(303, headers={'Location': '/login'})
+
+
+def set_session(response, request):
+    response.set_cookie(SESSION_COOKIE, request.app.state.signer.dumps({'username': 'admin'}),
+                       max_age=86400, httponly=True, secure=request.url.scheme == 'https',
+                       samesite='lax')
 
 
 def check_csrf(request, token):
@@ -56,15 +94,19 @@ async def lifespan(app):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     TORRENT_DIR.mkdir(parents=True, exist_ok=True)
     credential = DATA_DIR / 'admin-password'
-    try:
-        with open(credential, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
-            output.write(secrets.token_urlsafe(32))
-    except FileExistsError:
-        pass
-    app.state.admin_password = credential.read_text().strip()
-    if not app.state.admin_password:
-        raise RuntimeError('Admin password file is empty.')
-    app.state.signer = URLSafeTimedSerializer(app.state.admin_password, salt='settings-csrf')
+    stored_password = credential.read_text().strip() if credential.exists() else ''
+    initial_password = os.environ.get('LOKAL_ADMIN_PASSWORD')
+    if not stored_password and initial_password:
+        stored_password = hash_password(initial_password)
+        credential.write_text(stored_password)
+        os.chmod(credential, 0o600)
+    if stored_password and not stored_password.startswith(PASSWORD_PREFIX):
+        stored_password = hash_password(stored_password)
+        credential.write_text(stored_password)
+        os.chmod(credential, 0o600)
+    app.state.admin_password_hash = stored_password or None
+    signer_secret = stored_password or secrets.token_urlsafe(32)
+    app.state.signer = URLSafeTimedSerializer(signer_secret, salt='settings-session')
     Base.metadata.create_all(engine)
     seed()
     app.state.worker = ScraperWorker()
@@ -109,6 +151,67 @@ def health():
     with SessionLocal() as session:
         session.execute(select(1))
     return {'status': 'ok'}
+
+
+@app.get('/setup')
+def setup_page(request: Request):
+    if request.app.state.admin_password_hash:
+        return RedirectResponse('/login', status_code=303)
+    return templates.TemplateResponse(request=request, name='setup.html', context={'error': None})
+
+
+@app.post('/setup')
+async def setup_account(request: Request):
+    if request.app.state.admin_password_hash:
+        return RedirectResponse('/login', status_code=303)
+    form = await request.form(max_fields=10)
+    password = str(form.get('password', ''))
+    confirmation = str(form.get('confirmation', ''))
+    if len(password) < 12:
+        error = 'Password must be at least 12 characters.'
+    elif len(password) > 4096:
+        error = 'Password exceeds 4096 characters.'
+    elif password != confirmation:
+        error = 'Password confirmation does not match.'
+    else:
+        password_hash = hash_password(password)
+        credential = DATA_DIR / 'admin-password'
+        credential.write_text(password_hash)
+        os.chmod(credential, 0o600)
+        request.app.state.admin_password_hash = password_hash
+        request.app.state.signer = URLSafeTimedSerializer(password_hash, salt='settings-session')
+        response = RedirectResponse('/settings', status_code=303)
+        set_session(response, request)
+        return response
+    return templates.TemplateResponse(request=request, name='setup.html', context={'error': error}, status_code=400)
+
+
+@app.get('/login')
+def login_page(request: Request):
+    if not request.app.state.admin_password_hash:
+        return RedirectResponse('/setup', status_code=303)
+    if session_user(request) == 'admin':
+        return RedirectResponse('/settings', status_code=303)
+    return templates.TemplateResponse(request=request, name='login.html', context={'error': None})
+
+
+@app.post('/login')
+async def login(request: Request):
+    if not request.app.state.admin_password_hash:
+        return RedirectResponse('/setup', status_code=303)
+    form = await request.form(max_fields=10)
+    if str(form.get('username', '')) != 'admin' or not verify_password(str(form.get('password', '')), request.app.state.admin_password_hash):
+        return templates.TemplateResponse(request=request, name='login.html', context={'error': 'Invalid username or password.'}, status_code=401)
+    response = RedirectResponse('/settings', status_code=303)
+    set_session(response, request)
+    return response
+
+
+@app.post('/logout')
+def logout():
+    response = RedirectResponse('/login', status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
 
 
 @app.get('/settings', dependencies=[Depends(admin)])
@@ -210,7 +313,7 @@ async def change_password(request: Request):
     new_password = str(form.get('new_password', ''))
     confirm_password = str(form.get('confirm_password', ''))
     try:
-        if not hmac.compare_digest(current_password.encode(), request.app.state.admin_password.encode()):
+        if not verify_password(current_password, request.app.state.admin_password_hash):
             raise ValueError('Current password is incorrect.')
         if new_password != confirm_password:
             raise ValueError('New password confirmation does not match.')
@@ -221,10 +324,11 @@ async def change_password(request: Request):
     except ValueError as exc:
         return RedirectResponse(f'/settings?error={quote(str(exc))}', status_code=303)
     credential = DATA_DIR / 'admin-password'
-    credential.write_text(new_password)
+    password_hash = hash_password(new_password)
+    credential.write_text(password_hash)
     os.chmod(credential, 0o600)
-    request.app.state.admin_password = new_password
-    request.app.state.signer = URLSafeTimedSerializer(new_password, salt='settings-csrf')
+    request.app.state.admin_password_hash = password_hash
+    request.app.state.signer = URLSafeTimedSerializer(password_hash, salt='settings-csrf')
     return RedirectResponse('/settings?saved=password', status_code=303)
 
 

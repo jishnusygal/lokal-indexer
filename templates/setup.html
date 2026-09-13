@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Initial setup | Lokal Indexer</title>
+{% include "_style.html" %}
+</head>
+<body>
+<main class="auth-shell">
+  <section class="auth-card">
+    <p class="eyebrow">FIRST RUN</p>
+    <h1>Create admin access</h1>
+    <p class="muted">Choose the password for the Lokal Indexer dashboard. Only its salted hash will be stored.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form action="/setup" method="post" class="auth-form">
+      <label for="password">Admin password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required autofocus>
+      <small>At least 12 characters.</small>
+      <label for="confirmation">Confirm password</label>
+      <input id="confirmation" name="confirmation" type="password" autocomplete="new-password" minlength="12" required>
+      <button class="primary" type="submit">Finish setup</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>

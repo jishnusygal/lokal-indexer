@@ -9,7 +9,24 @@ from database import Base
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOKAL_ADMIN_PASSWORD', 'test-admin-password')
     engine = create_engine(f'sqlite:///{tmp_path / "test.db"}', connect_args={'check_same_thread': False})
+    factory = sessionmaker(engine, expire_on_commit=False)
+    for module in (main, config, scraper):
+        monkeypatch.setattr(module, 'SessionLocal', factory)
+    monkeypatch.setattr(main, 'engine', engine)
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'TORRENT_DIR', tmp_path / 'torrents')
+    monkeypatch.setattr(scraper, 'TORRENT_DIR', tmp_path / 'torrents')
+    with TestClient(main.app) as client:
+        yield client, factory, tmp_path
+    engine.dispose()
+
+
+@pytest.fixture
+def setup_service(tmp_path, monkeypatch):
+    monkeypatch.delenv('LOKAL_ADMIN_PASSWORD', raising=False)
+    engine = create_engine(f'sqlite:///{tmp_path / "setup.db"}', connect_args={'check_same_thread': False})
     factory = sessionmaker(engine, expire_on_commit=False)
     for module in (main, config, scraper):
         monkeypatch.setattr(module, 'SessionLocal', factory)
