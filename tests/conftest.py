@@ -10,6 +10,7 @@ from database import Base
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     monkeypatch.setenv('LOKAL_ADMIN_PASSWORD', 'test-admin-password')
+    monkeypatch.setenv('LOKAL_INTERNAL_URL', 'http://lokal-indexer')
     engine = create_engine(f'sqlite:///{tmp_path / "test.db"}', connect_args={'check_same_thread': False})
     factory = sessionmaker(engine, expire_on_commit=False)
     for module in (main, config, scraper):
@@ -26,6 +27,7 @@ def service(tmp_path, monkeypatch):
 @pytest.fixture
 def setup_service(tmp_path, monkeypatch):
     monkeypatch.delenv('LOKAL_ADMIN_PASSWORD', raising=False)
+    monkeypatch.setenv('LOKAL_INTERNAL_URL', 'http://lokal-indexer')
     engine = create_engine(f'sqlite:///{tmp_path / "setup.db"}', connect_args={'check_same_thread': False})
     factory = sessionmaker(engine, expire_on_commit=False)
     for module in (main, config, scraper):

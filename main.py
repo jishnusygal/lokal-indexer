@@ -44,6 +44,10 @@ def service_url(values, request):
     return str(request.base_url).rstrip('/')
 
 
+def internal_service_url():
+    return os.environ.get('LOKAL_INTERNAL_URL', '').rstrip('/')
+
+
 PASSWORD_PREFIX = 'scrypt$'
 
 
@@ -248,10 +252,10 @@ def settings_page(request: Request):
         if page_num > total_pages:
             page_num = total_pages
         recent_releases = session.scalars(rel_query.offset((page_num - 1) * page_size).limit(page_size)).all()
-    service_base_url = service_url(values, request)
+    service_base_url = internal_service_url()
     sonarr_key = values.get('sonarr_api_key', values['api_key'])
     radarr_key = values.get('radarr_api_key', values['api_key'])
-    indexer_base_url = f'{service_base_url.rstrip("/")}/api'
+    indexer_base_url = f'{service_base_url}/api' if service_base_url else ''
     return templates.TemplateResponse(request=request, name='settings.html', context={
         'values': values, 'logs': logs, 'count': count, 'saved': request.query_params.get('saved'),
         'error': request.query_params.get('error'),
