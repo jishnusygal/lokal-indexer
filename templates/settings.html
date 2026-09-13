@@ -130,10 +130,10 @@
         {% if logs %}
         <div class="logs-wrap">
           <table class="logs">
-            <thead><tr><th>Time</th><th>Status</th><th>Added</th><th>Details</th></tr></thead>
+            <thead><tr><th>Time</th><th>Status</th><th>Added</th><th>Duration</th><th>Details</th></tr></thead>
             <tbody>
               {% for log in logs %}
-              <tr><td>{{ log.timestamp.strftime('%m-%d %H:%M') }}</td><td><span class="badge status-{{ log.status }}">{{ log.status }}</span></td><td>{{ log.items_added }}</td><td>{{ log.error_message or 'Completed' }}</td></tr>
+              <tr><td>{{ log.timestamp.strftime('%m-%d %H:%M') }}</td><td><span class="badge status-{{ log.status }}">{{ log.status }}</span></td><td>{{ log.items_added }}</td><td>{{ ('%.1fs' | format(log.duration_seconds)) if log.duration_seconds is not none else '-' }}</td><td>{{ log.error_message or 'Completed' }}</td></tr>
               {% endfor %}
             </tbody>
           </table>

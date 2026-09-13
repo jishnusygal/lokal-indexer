@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urljoin, urlsplit
 
@@ -459,10 +460,17 @@ class ScraperWorker:
             values = settings()
             if not values.get('target_url'):
                 return  # An unconfigured installation is deliberately idle.
+            started = time.monotonic()
             try:
                 async with asyncio.timeout(900):
                     await scrape(values)
+                duration = time.monotonic() - started
+                with SessionLocal.begin() as session:
+                    log = session.scalar(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(1))
+                    if log and log.status == 'success':
+                        log.duration_seconds = duration
             except Exception as exc:
+                duration = time.monotonic() - started
                 if isinstance(exc, ScrapeError):
                     message = str(exc)
                 elif isinstance(exc, PlaywrightTimeoutError):
@@ -470,7 +478,8 @@ class ScraperWorker:
                 else:
                     message = f'{type(exc).__name__}: scrape failed. Check target availability, CSS selectors, and release metadata.'
                 with SessionLocal.begin() as session:
-                    session.add(ScraperLog(status='failure', items_added=0, error_message=message))
+                    session.add(ScraperLog(status='failure', items_added=0,
+                                           error_message=message, duration_seconds=duration))
                 await asyncio.to_thread(notify_failure, message)
             finally:
                 with SessionLocal.begin() as session:

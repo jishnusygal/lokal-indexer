@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, String, Text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from database import Base
 
@@ -32,3 +32,4 @@ class ScraperLog(Base):
     status: Mapped[str] = mapped_column(String)
     items_added: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)

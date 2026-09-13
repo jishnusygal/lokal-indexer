@@ -4,6 +4,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from config import DEFAULTS, seed, settings, validate
 from database import Base, DATA_DIR, SessionLocal, TORRENT_DIR, engine
@@ -101,6 +102,13 @@ def schedule(app, interval):
                                 replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
 
 
+def migrate_schema():
+    with engine.begin() as connection:
+        columns = connection.execute(text('PRAGMA table_info(scraper_logs)')).all()
+        if columns and not any(row[1] == 'duration_seconds' for row in columns):
+            connection.execute(text('ALTER TABLE scraper_logs ADD COLUMN duration_seconds FLOAT'))
+
+
 @asynccontextmanager
 async def lifespan(app):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -120,6 +128,7 @@ async def lifespan(app):
     signer_secret = stored_password or secrets.token_urlsafe(32)
     app.state.signer = URLSafeTimedSerializer(signer_secret, salt='settings-session')
     Base.metadata.create_all(engine)
+    migrate_schema()
     seed()
     app.state.worker = ScraperWorker()
     app.state.scheduler = AsyncIOScheduler(timezone='UTC')

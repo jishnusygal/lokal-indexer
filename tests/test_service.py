@@ -47,6 +47,10 @@ def test_admin_settings_csrf_and_schedule(service):
     config.seed()
     assert config.settings()['api_key'] == 'x' * 32
     assert client.post('/sync', data={'csrf': token}, follow_redirects=False).status_code == 303
+    with factory.begin() as session:
+        session.add(ScraperLog(status='success', items_added=2, duration_seconds=1.25))
+    assert 'Duration' in client.get('/settings').text
+    assert '1.2s' in client.get('/settings').text
     assert client.post('/logout', follow_redirects=False).status_code == 303
     assert client.get('/settings', follow_redirects=False).headers['location'] == '/login'
 
