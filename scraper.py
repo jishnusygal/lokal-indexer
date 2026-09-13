@@ -311,10 +311,17 @@ async def scrape(values):
     releases = {}
     seen_pages = set()
     seen_detail_urls = set()
+    user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36')
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
         try:
-            context = await browser.new_context(accept_downloads=False, service_workers='block')
+            context = await browser.new_context(
+                user_agent=user_agent,
+                locale='en-US',
+                accept_downloads=False,
+                service_workers='block'
+            )
             context.set_default_timeout(30000)
             page = await context.new_page()
             for _ in range(int(values['max_pages'])):

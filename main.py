@@ -85,7 +85,7 @@ async def security_headers(request, call_next):
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'"
     return response
 
 
@@ -138,14 +138,7 @@ async def save_settings(request: Request):
         values['api_key'] = values['sonarr_api_key']
     if form.get('clear_telegram'):
         values['telegram_bot_token'] = values['telegram_chat_id'] = ''
-    new_password = str(form.get('new_admin_password', ''))
-    confirm_password = str(form.get('confirm_admin_password', ''))
     try:
-        if new_password or confirm_password:
-            if new_password != confirm_password:
-                raise ValueError('Admin password confirmation does not match.')
-            if len(new_password) < 12:
-                raise ValueError('Admin password must be at least 12 characters.')
         if any(len(value) > 4096 for value in values.values()):
             raise ValueError('Setting exceeds 4096 characters.')
         validate(values)
@@ -154,14 +147,34 @@ async def save_settings(request: Request):
     with SessionLocal.begin() as session:
         for key, value in values.items():
             session.merge(Setting(key=key, value=value))
-    if new_password:
-        credential = DATA_DIR / 'admin-password'
-        credential.write_text(new_password)
-        os.chmod(credential, 0o600)
-        request.app.state.admin_password = new_password
-        request.app.state.signer = URLSafeTimedSerializer(new_password, salt='settings-csrf')
     schedule(request.app, values['sync_interval'])
     return RedirectResponse('/settings?saved=1', status_code=303)
+
+
+@app.post('/account/password', dependencies=[Depends(admin)])
+async def change_password(request: Request):
+    form = await request.form(max_fields=10)
+    check_csrf(request, str(form.get('csrf', '')))
+    current_password = str(form.get('current_password', ''))
+    new_password = str(form.get('new_password', ''))
+    confirm_password = str(form.get('confirm_password', ''))
+    try:
+        if not hmac.compare_digest(current_password.encode(), request.app.state.admin_password.encode()):
+            raise ValueError('Current password is incorrect.')
+        if new_password != confirm_password:
+            raise ValueError('New password confirmation does not match.')
+        if len(new_password) < 12:
+            raise ValueError('New password must be at least 12 characters.')
+        if len(new_password) > 4096:
+            raise ValueError('New password exceeds 4096 characters.')
+    except ValueError as exc:
+        return RedirectResponse(f'/settings?error={quote(str(exc))}', status_code=303)
+    credential = DATA_DIR / 'admin-password'
+    credential.write_text(new_password)
+    os.chmod(credential, 0o600)
+    request.app.state.admin_password = new_password
+    request.app.state.signer = URLSafeTimedSerializer(new_password, salt='settings-csrf')
+    return RedirectResponse('/settings?saved=password', status_code=303)
 
 
 @app.post('/sync', dependencies=[Depends(admin)])

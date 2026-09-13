@@ -46,7 +46,8 @@
     <span class="muted">Syncs every {{ values.sync_interval }} min</span>
   </div>
 
-  {% if saved %}<p class="notice success" role="status">Saved. New settings are active.</p>{% endif %}
+  {% if saved == '1' %}<p class="notice success" role="status">Saved. New settings are active.</p>{% endif %}
+  {% if saved == 'password' %}<p class="notice success" role="status">Password changed.</p>{% endif %}
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   {% if last_log and last_log.error_message %}<p class="error" role="alert">{{ last_log.error_message }}</p>{% endif %}
 
@@ -80,7 +81,7 @@
         </div>
         <div class="section">
           <h3>Scrape Source</h3>
-          <div class="fields" style="margin-top:14px">
+          <div class="fields">
             <div class="full"><label for="target_url">Source page URL</label><input id="target_url" name="target_url" type="url" pattern="https?://.+" maxlength="4096" value="{{ values.target_url }}" placeholder="https://example.com/releases" title="The page Playwright opens to find releases. Blank pauses scraping."><small>The page Playwright opens to find releases. Blank pauses scraping.</small></div>
             <div><label for="public_url">Indexer base URL</label><input id="public_url" name="public_url" type="url" pattern="https?://[^?#]+" maxlength="4096" value="{{ values.public_url }}" placeholder="http://localhost:8000" title="The address Sonarr/Radarr can reach. Usually this is the container host URL."><small>The address Sonarr/Radarr can reach. Usually this is the container host URL.</small></div>
             <div><label for="sync_interval">Automatic scrape frequency</label><input id="sync_interval" name="sync_interval" type="number" min="1" max="10080" step="1" value="{{ values.sync_interval }}" required title="Minutes between scheduled scrapes (1-10080)."><small>Minutes between scheduled scrapes.</small></div>
@@ -88,20 +89,13 @@
         </div>
         <div class="section">
           <h3>Notifications</h3>
-          <div class="fields" style="margin-top:14px">
+          <div class="fields">
             <div><label for="telegram_bot_token">Telegram bot token</label><input id="telegram_bot_token" name="telegram_bot_token" type="password" autocomplete="new-password" maxlength="4096" placeholder="{{ 'Configured' if values.telegram_bot_token else 'Disabled' }}" title="Telegram is disabled when token and chat ID are both blank."><small>Telegram is disabled when token and chat ID are both blank.</small></div>
             <div><label for="telegram_chat_id">Telegram chat ID</label><input id="telegram_chat_id" name="telegram_chat_id" maxlength="4096" value="{{ values.telegram_chat_id }}" title="Set both Telegram fields to enable Telegram alerts."><small>Set both Telegram fields to enable Telegram alerts.</small></div>
             <div class="full"><label for="webhook_url">Webhook URL</label><input id="webhook_url" name="webhook_url" type="url" pattern="https?://.+" maxlength="4096" value="{{ values.webhook_url }}" placeholder="https://example.com/hooks/lokal" title="Optional JSON webhook for failures. Works even when Telegram is disabled."><small>Optional JSON webhook for failures. Works even when Telegram is disabled.</small></div>
             <label class="checkline full"><input type="checkbox" name="clear_telegram" value="1" title="Remove the saved Telegram bot token and chat ID on save"> Clear Telegram credentials</label>
           </div>
         </div>
-        <details class="section">
-          <summary>Admin Password</summary>
-          <div class="fields">
-            <div><label for="new_admin_password">New password</label><input id="new_admin_password" name="new_admin_password" type="password" autocomplete="new-password" minlength="12" maxlength="4096" placeholder="Leave blank to keep current password" title="Leave blank to keep the current password. New password must be at least 12 characters."></div>
-            <div><label for="confirm_admin_password">Confirm password</label><input id="confirm_admin_password" name="confirm_admin_password" type="password" autocomplete="new-password" minlength="12" maxlength="4096" title="Must exactly match the new password above."></div>
-          </div>
-        </details>
         <div class="section">
           <h3>Scraping Adapter</h3>
           <p>CSS selectors are evaluated inside each release row, except the next page selector.</p>
@@ -116,6 +110,21 @@
           <p>Blank secret fields keep the saved value.</p>
           <button class="primary" type="submit" title="Save all changes below. Blank secret fields keep their current saved value.">Save Configuration</button>
         </div>
+      </form>
+      <form action="/account/password" method="post">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <details class="section">
+          <summary>Admin Password</summary>
+          <div class="fields">
+            <div class="full"><label for="current_password">Current password</label><input id="current_password" name="current_password" type="password" autocomplete="current-password" required title="Your current admin password."></div>
+            <div><label for="new_password">New password</label><input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="4096" required placeholder="At least 12 characters" title="New password must be at least 12 characters."><small>At least 12 characters.</small></div>
+            <div><label for="confirm_password">Confirm new password</label><input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="4096" required title="Must exactly match the new password above."><small>Must match exactly.</small></div>
+          </div>
+          <div class="form-footer">
+            <p>Requires your current password.</p>
+            <button class="primary" type="submit" title="Change the admin password">Change Password</button>
+          </div>
+        </details>
       </form>
     </section>
     <aside class="panel">

@@ -9,7 +9,7 @@
 *{box-sizing:border-box}
 body{margin:0}
 a{color:inherit;text-decoration:none}
-h1,h2,h3,p{margin:0}
+h1,h2,p{margin:0}
 p{color:var(--muted);line-height:1.5}
 .muted{color:var(--muted)}
 button,.button,input:not([type=checkbox]),select{font:inherit;border:1px solid var(--border);border-radius:7px;padding:10px 14px;background:var(--raised);color:var(--text)}
@@ -32,7 +32,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 .eyebrow{font-size:10px;letter-spacing:2px;font-weight:700;color:var(--muted);margin:0 0 10px;text-transform:uppercase}
 h1{font-size:34px;letter-spacing:-1px;font-weight:650}
 h2{font-size:18px;font-weight:650;margin-bottom:4px}
-h3{font-size:14px;font-weight:650}
+h3{font-size:14px;font-weight:650;margin:0 0 14px}
 .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .status{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--muted)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);display:inline-block}
@@ -65,6 +65,7 @@ h3{font-size:14px;font-weight:650}
 .section+.section{border-top:1px solid var(--border)}
 .section-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}
 form{margin:0}
+form+form{border-top:1px solid var(--border)}
 
 .fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .full{grid-column:1/-1}
@@ -79,7 +80,7 @@ input[readonly]{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace
 .endpoint>div{display:flex;gap:8px;align-items:center}
 .endpoint input{width:100%;min-width:0}
 .endpoint span,.endpoint label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:600;margin:0}
-.apps{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.apps{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
 .appbox{background:var(--raised);border:1px solid var(--border);border-radius:10px;padding:20px}
 .appbox h3{margin-bottom:14px}
 .test-link{display:inline-block;margin-top:12px;color:var(--primary);font-size:12px;font-weight:600}
