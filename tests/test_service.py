@@ -29,6 +29,9 @@ def test_admin_settings_csrf_and_schedule(service):
     token = admin_form(client, path)
     page = client.get('/settings')
     assert 'data-open-api-key' in page.text
+    assert 'http://testserver/api' in page.text
+    forwarded = client.get('/settings', headers={'x-forwarded-proto': 'http', 'x-forwarded-host': 'indexer'}).text
+    assert 'http://indexer/api' in forwarded
     assert '<script nonce="' in page.text
     assert "script-src 'nonce-" in page.headers['content-security-policy']
     assert client.post('/settings', data={'sync_interval': '2'}).status_code == 403

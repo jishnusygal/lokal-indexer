@@ -32,6 +32,17 @@ logger = logging.getLogger('lokal-indexer')
 templates = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
 SESSION_COOKIE = 'lokal_session'
 
+
+def service_url(values, request):
+    configured_url = os.environ.get('LOKAL_PUBLIC_URL') or values.get('public_url')
+    if configured_url:
+        return configured_url.rstrip('/')
+    forwarded_proto = request.headers.get('x-forwarded-proto', '').split(',', 1)[0].strip()
+    forwarded_host = request.headers.get('x-forwarded-host', '').split(',', 1)[0].strip()
+    if forwarded_proto in ('http', 'https') and forwarded_host:
+        return f'{forwarded_proto}://{forwarded_host}'
+    return str(request.base_url).rstrip('/')
+
 PASSWORD_PREFIX = 'scrypt$'
 
 
@@ -236,10 +247,10 @@ def settings_page(request: Request):
         if page_num > total_pages:
             page_num = total_pages
         recent_releases = session.scalars(rel_query.offset((page_num - 1) * page_size).limit(page_size)).all()
-    service_url = values['public_url'] or str(request.base_url).rstrip('/')
+    service_base_url = service_url(values, request)
     sonarr_key = values.get('sonarr_api_key', values['api_key'])
     radarr_key = values.get('radarr_api_key', values['api_key'])
-    indexer_base_url = f'{service_url}/api'
+    indexer_base_url = f'{service_base_url.rstrip("/")}/api'
     return templates.TemplateResponse(request=request, name='settings.html', context={
         'values': values, 'logs': logs, 'count': count, 'saved': request.query_params.get('saved'),
         'error': request.query_params.get('error'),
@@ -395,7 +406,7 @@ def api(request: Request):
             releases = session.scalars(select(Release).where(*conditions).order_by(Release.pub_date.desc(), Release.id).offset(offset).limit(limit)).all()
         values = settings()
         api_key = values.get('api_key') or values.get('radarr_api_key' if kind == 'movie' else 'sonarr_api_key', '')
-        return xml_response(torznab.feed(releases, total, offset, values['public_url'] or str(request.base_url).rstrip('/'), api_key))
+        return xml_response(torznab.feed(releases, total, offset, service_url(values, request), api_key))
     except ValueError:
         return xml_response(torznab.error(201, 'Invalid search parameters'))
 
