@@ -30,10 +30,10 @@ class ScrapeError(ValueError):
 async def inspect_and_auto_detect_selectors(page, values):
     """
     Auto-detect suitable selectors if not explicitly provided or if defaults fail.
-    Specifically detects forum topics (e.g. 1TamilMV, IPS forums) or standard release tables.
+    Specifically detects forum topics or standard release tables.
     """
     val = dict(values)
-    # Check if we are on an IPS / 1TamilMV forum index or category page
+    # Check if we are on an IPS-style forum index or category page
     has_topic_links = await page.locator('a[href*="/forums/topic/"], a[href*="/topic/"]').count()
     if has_topic_links > 0:
         if not val.get('detail_selector') or val.get('row_selector') == '.release':

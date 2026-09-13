@@ -43,6 +43,7 @@ def service_url(values, request):
         return f'{forwarded_proto}://{forwarded_host}'
     return str(request.base_url).rstrip('/')
 
+
 PASSWORD_PREFIX = 'scrypt$'
 
 
@@ -258,6 +259,7 @@ def settings_page(request: Request):
         'csp_nonce': request.state.csp_nonce,
         'running': request.app.state.worker.lock.locked(),
         'indexer_base_url': indexer_base_url,
+        'indexer_service_url': service_base_url,
         'sonarr_caps_url': f'{indexer_base_url}?t=caps&apikey={sonarr_key}',
         'radarr_caps_url': f'{indexer_base_url}?t=caps&apikey={radarr_key}',
         'last_log': logs[0] if logs else None,

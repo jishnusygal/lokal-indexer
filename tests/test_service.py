@@ -30,6 +30,8 @@ def test_admin_settings_csrf_and_schedule(service):
     page = client.get('/settings')
     assert 'data-open-api-key' in page.text
     assert 'http://testserver/api' in page.text
+    assert 'https://indexer.jishflix.in/api' not in page.text
+    assert 'id="public_url" type="url" value="http://testserver" readonly disabled' in page.text
     forwarded = client.get('/settings', headers={'x-forwarded-proto': 'http', 'x-forwarded-host': 'indexer'}).text
     assert 'http://indexer/api' in forwarded
     assert '<script nonce="' in page.text
@@ -137,7 +139,7 @@ def test_sizes(text, expected):
 
 
 @pytest.mark.parametrize('text, expected', [
-    ('www.1TamilMV.meme - Haiwaan (2026) Hindi HQ PreDVD - x264 - HQ Clean - AAC - 400MB.mkv',
+    ('www.example-source.test - Haiwaan (2026) Hindi HQ PreDVD - x264 - HQ Clean - AAC - 400MB.mkv',
      'Haiwaan (2026) Hindi HQ PreDVD x264 HQ Clean AAC 400MB'),
     ('Reacher.S04E07.1080p.WEB-DL.mkv', 'Reacher S04E07 1080p WEB DL'),
     ('Movie (2026)', 'Movie (2026)'),

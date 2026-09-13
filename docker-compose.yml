@@ -17,7 +17,3 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    networks:
-      default:
-        aliases:
-          - indexer

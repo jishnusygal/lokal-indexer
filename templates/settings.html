@@ -80,7 +80,7 @@
           <h3>Scrape Source</h3>
           <div class="fields">
             <div class="full"><label for="target_url">Source page URL</label><input id="target_url" name="target_url" type="url" pattern="https?://.+" maxlength="4096" value="{{ values.target_url }}" placeholder="https://example.com/releases" title="The page Playwright opens to find releases. Blank pauses scraping."><small>The page Playwright opens to find releases. Blank pauses scraping.</small></div>
-            <div><label for="public_url">Indexer base URL</label><input id="public_url" name="public_url" type="url" pattern="https?://[^?#]+" maxlength="4096" value="{{ values.public_url }}" placeholder="http://localhost:8000" title="The address Sonarr/Radarr can reach. Usually this is the container host URL."><small>The address Sonarr/Radarr can reach. Usually this is the container host URL.</small></div>
+            <div><label for="public_url">Indexer base URL</label><input id="public_url" type="url" value="{{ indexer_service_url }}" readonly disabled title="Automatically resolved from the incoming network address."><small>Automatically resolved from the incoming network address.</small></div>
             <div><label for="sync_interval">Automatic scrape frequency</label><input id="sync_interval" name="sync_interval" type="number" min="1" max="10080" step="1" value="{{ values.sync_interval }}" required title="Minutes between scheduled scrapes (1-10080)."><small>Minutes between scheduled scrapes.</small></div>
           </div>
         </div>
