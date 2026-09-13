@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import bencodepy
-from playwright.async_api import async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 from sqlalchemy import delete, select
 from config import http_url, settings
 from database import SessionLocal, TORRENT_DIR
@@ -22,6 +22,25 @@ MAX_ROWS = 2000
 
 class ScrapeError(ValueError):
     """A safe, actionable error message suitable for logs and notifications."""
+
+
+async def inspect_and_auto_detect_selectors(page, values):
+    """
+    Auto-detect suitable selectors if not explicitly provided or if defaults fail.
+    Specifically detects forum topics (e.g. 1TamilMV, IPS forums) or standard release tables.
+    """
+    val = dict(values)
+    # Check if we are on an IPS / 1TamilMV forum index or category page
+    has_topic_links = await page.locator('a[href*="/forums/topic/"], a[href*="/topic/"]').count()
+    if has_topic_links > 0:
+        if not val.get('detail_selector') or val.get('row_selector') == '.release':
+            val['row_selector'] = 'a[href*="/forums/topic/"], a[href*="/topic/"]'
+            val['detail_selector'] = 'self'
+            val['title_selector'] = 'self'
+            val['magnet_selector'] = 'a[href^="magnet:"]'
+            val['torrent_selector'] = 'a[href*="attachment.php"], a[href$=".torrent"]'
+            val['next_selector'] = 'li.ipsPagination_next a, a[rel="next"]'
+    return val
 
 
 def parse_size(value):
@@ -108,6 +127,8 @@ def save_torrent(digest, body):
 async def field(row, selector, attribute=None):
     if not selector:
         return ''
+    if selector.strip().lower() in ('self', '.'):
+        return ((await row.get_attribute(attribute) if attribute else await row.inner_text()) or '').strip()
     node = row.locator(selector).first
     if not await node.count():
         return ''
@@ -274,11 +295,16 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
 
 
 async def scrape_page_releases(page, context, values, releases, seen_detail_urls, origin):
-    await page.locator(values['row_selector']).first.wait_for(state='attached')
+    try:
+        await page.locator(values['row_selector']).first.wait_for(state='attached', timeout=30000)
+    except PlaywrightTimeoutError:
+        raise ScrapeError(f"Timeout waiting for row selector '{values['row_selector']}'. Target page loaded, but no matching rows were found.")
     rows = page.locator(values['row_selector'])
     count = await rows.count()
-    if count == 0 or count > MAX_ROWS:
-        raise ScrapeError('Zero release rows found, or page exceeds the 2000-row limit.')
+    if count == 0:
+        raise ScrapeError(f"Zero release rows found matching '{values['row_selector']}'.")
+    if count > MAX_ROWS:
+        raise ScrapeError(f"Page rows ({count}) exceeds the 2000-row limit.")
 
     detail_sel = values.get('detail_selector')
     if detail_sel:
@@ -289,16 +315,20 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
                 detail_href = await row.get_attribute('href')
             if not detail_href:
                 continue
-            detail_url = http_url(urljoin(page.url, detail_href))
+            detail_url = http_url(urljoin(page.url, detail_href).split('#')[0])
             if urlsplit(detail_url).netloc != origin:
                 raise ScrapeError('Pagination must remain on the configured host.')
             if detail_url in seen_detail_urls:
                 continue
             seen_detail_urls.add(detail_url)
-            topic_title = await field(row, values.get('title_selector'))
+            topic_title = (await field(row, values.get('title_selector'))) or (await row.inner_text() or '').strip()
             topic_date_text = await field(row, values.get('date_selector'), 'datetime')
             topic_date = datetime.fromisoformat(topic_date_text.replace('Z', '+00:00')) if topic_date_text else None
-            await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
+            try:
+                await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
+            except Exception:
+                # Allow scraping to continue if an individual topic page has issues
+                pass
     else:
         for idx in range(count):
             rel = await extract_release(rows.nth(idx), context, page, values)
@@ -328,11 +358,19 @@ async def scrape(values):
                 if target in seen_pages:
                     break
                 seen_pages.add(target)
-                response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
-                if response is None or response.status >= 400:
-                    raise ScrapeError('Target returned an unsuccessful HTTP response.')
-                await scrape_page_releases(page, context, values, releases, seen_detail_urls, origin)
-                next_link = await field(page, values.get('next_selector'), 'href')
+                try:
+                    response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
+                except PlaywrightTimeoutError:
+                    raise ScrapeError(f"Timeout loading '{target}'. Page did not complete loading within 60 seconds.")
+                except Exception as exc:
+                    raise ScrapeError(f"Failed to navigate to '{target}': {type(exc).__name__}")
+                if response is None:
+                    raise ScrapeError(f"No response received from '{target}'.")
+                if response.status >= 400:
+                    raise ScrapeError(f"Target '{target}' returned HTTP status {response.status}.")
+                active_values = await inspect_and_auto_detect_selectors(page, values)
+                await scrape_page_releases(page, context, active_values, releases, seen_detail_urls, origin)
+                next_link = await field(page, active_values.get('next_selector'), 'href')
                 if not next_link:
                     break
                 target = http_url(urljoin(page.url, next_link))
@@ -367,8 +405,12 @@ class ScraperWorker:
                 async with asyncio.timeout(900):
                     await scrape(values)
             except Exception as exc:
-                # Playwright exceptions may contain credential-bearing URLs and page contents.
-                message = str(exc) if isinstance(exc, ScrapeError) else f'{type(exc).__name__}: scrape failed. Check target availability, CSS selectors, and release metadata.'
+                if isinstance(exc, ScrapeError):
+                    message = str(exc)
+                elif isinstance(exc, PlaywrightTimeoutError):
+                    message = f'TimeoutError: scraper timed out on {type(exc).__name__}. Check target availability and page load.'
+                else:
+                    message = f'{type(exc).__name__}: scrape failed. Check target availability, CSS selectors, and release metadata.'
                 with SessionLocal.begin() as session:
                     session.add(ScraperLog(status='failure', items_added=0, error_message=message))
                 await asyncio.to_thread(notify_failure, message)
