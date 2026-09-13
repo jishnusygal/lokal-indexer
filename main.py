@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -20,6 +21,13 @@ from database import Base, DATA_DIR, SessionLocal, TORRENT_DIR, engine
 from models import Release, ScraperLog, Setting
 from scraper import ScraperWorker
 import torznab
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger('lokal-indexer')
 
 basic = HTTPBasic()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))

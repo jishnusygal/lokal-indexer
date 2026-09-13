@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import hashlib
+import logging
 import os
 import re
 import tempfile
@@ -15,6 +16,8 @@ from config import http_url, settings
 from database import SessionLocal, TORRENT_DIR
 from models import Release, ScraperLog, utcnow
 from notifier import notify_failure
+
+logger = logging.getLogger(__name__)
 
 MAX_TORRENT_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 2000
@@ -195,6 +198,9 @@ async def resolve_size(row, values, magnet, title, fallback_title):
     raise ScrapeError('Release has neither a valid size attribute nor an xl parameter in magnet.')
 
 
+GENERIC_TITLES = {'magnet', 'download', 'torrent', 'direct link', 'link', 'get torrent', 'click here', 'file'}
+
+
 async def extract_release(row, context, page, values, fallback_title='', fallback_date=None):
     title = await field(row, values.get('title_selector'))
     magnet = await field(row, values.get('magnet_selector') or 'a[href^="magnet:"]', 'href')
@@ -210,17 +216,24 @@ async def extract_release(row, context, page, values, fallback_title='', fallbac
     path, size = None, None
 
     if torrent_url:
-        torrent_url = http_url(urljoin(page.url, torrent_url))
-        torrent_digest, size, path = await download_torrent(context, torrent_url)
-        if digest and digest != torrent_digest:
-            raise ScrapeError('Torrent and magnet hashes do not match.')
-        digest = torrent_digest
+        try:
+            torrent_url = http_url(urljoin(page.url, torrent_url))
+            torrent_digest, size, path = await download_torrent(context, torrent_url)
+            if digest and digest != torrent_digest:
+                raise ScrapeError('Torrent and magnet hashes do not match.')
+            digest = torrent_digest
+        except Exception as err:
+            logger.debug('Torrent file download failed (%s): %s', torrent_url, err)
+            if not magnet:
+                raise
+            # If download fails but we have magnet, proceed with magnet
+            size = await resolve_size(row, values, magnet, title, fallback_title)
     elif magnet:
         size = await resolve_size(row, values, magnet, title, fallback_title)
     else:
         raise ScrapeError('Release has neither a torrent link nor a valid magnet.')
 
-    if not title:
+    if not title or title.lower().strip() in GENERIC_TITLES or len(title.strip()) < 4:
         if magnet and magnet_params(magnet).get('dn'):
             title = magnet_params(magnet)['dn'][0].strip()
         elif fallback_title:
@@ -232,6 +245,8 @@ async def extract_release(row, context, page, values, fallback_title='', fallbac
         raise ScrapeError('Release has a missing or oversized title.')
 
     match = re.search(r'(?i)\bS(\d{1,3})(?:E(\d{1,4}))?\b', title)
+    if not match and fallback_title:
+        match = re.search(r'(?i)\bS(\d{1,3})(?:E(\d{1,4}))?\b', fallback_title)
     season = int(match[1]) if match else None
     episode = int(match[2]) if match and match[2] else None
     category = await row.get_attribute('data-category') or ('tv' if match else 'movie')
@@ -259,37 +274,57 @@ async def extract_release(row, context, page, values, fallback_title='', fallbac
 
 
 async def scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases):
+    logger.info('Opening detail page: %s', detail_url)
     detail_page = await context.new_page()
     try:
         response = await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=60000)
         if response is None or response.status >= 400:
-            raise ScrapeError('Detail page returned an unsuccessful HTTP response.')
+            logger.warning('Detail page %s returned status %s', detail_url, response.status if response else 'None')
+            return
         date = topic_date
         if not date:
             d_date_text = await field(detail_page, values.get('date_selector'), 'datetime')
             if d_date_text:
-                date = datetime.fromisoformat(d_date_text.replace('Z', '+00:00'))
+                try:
+                    date = datetime.fromisoformat(d_date_text.replace('Z', '+00:00'))
+                except Exception:
+                    pass
 
         detail_row_sel = values.get('detail_row_selector')
         if detail_row_sel:
             sub_rows = detail_page.locator(detail_row_sel)
             for idx in range(await sub_rows.count()):
-                rel = await extract_release(sub_rows.nth(idx), context, detail_page, values, topic_title, date)
-                merge_release(releases, rel)
+                try:
+                    rel = await extract_release(sub_rows.nth(idx), context, detail_page, values, topic_title, date)
+                    if rel:
+                        merge_release(releases, rel)
+                        logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                except Exception as e:
+                    logger.debug('Detail row %d failed on %s: %s', idx, detail_url, e)
         else:
             mag_sel = values.get('magnet_selector') or 'a[href^="magnet:"]'
-            tor_sel = values.get('torrent_selector') or 'a[href$=".torrent"]'
+            tor_sel = values.get('torrent_selector') or 'a[href*="attachment.php"], a[href$=".torrent"]'
             downloads = detail_page.locator(f'{mag_sel}, {tor_sel}')
             d_count = await downloads.count()
             if d_count == 0 and await detail_page.locator(values['row_selector']).count() > 0:
                 d_rows = detail_page.locator(values['row_selector'])
                 for idx in range(await d_rows.count()):
-                    rel = await extract_release(d_rows.nth(idx), context, detail_page, values, topic_title, date)
-                    merge_release(releases, rel)
+                    try:
+                        rel = await extract_release(d_rows.nth(idx), context, detail_page, values, topic_title, date)
+                        if rel:
+                            merge_release(releases, rel)
+                            logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                    except Exception as e:
+                        logger.debug('Detail fallback row %d failed on %s: %s', idx, detail_url, e)
             else:
                 for idx in range(d_count):
-                    rel = await extract_release(downloads.nth(idx), context, detail_page, values, topic_title, date)
-                    merge_release(releases, rel)
+                    try:
+                        rel = await extract_release(downloads.nth(idx), context, detail_page, values, topic_title, date)
+                        if rel:
+                            merge_release(releases, rel)
+                            logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                    except Exception as e:
+                        logger.debug('Detail download link %d failed on %s: %s', idx, detail_url, e)
     finally:
         await detail_page.close()
 
@@ -343,6 +378,7 @@ async def scrape(values):
     seen_detail_urls = set()
     user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36')
+    logger.info('Starting scrape for target: %s', target)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
         try:
@@ -354,10 +390,11 @@ async def scrape(values):
             )
             context.set_default_timeout(30000)
             page = await context.new_page()
-            for _ in range(int(values['max_pages'])):
+            for page_num in range(1, int(values['max_pages']) + 1):
                 if target in seen_pages:
                     break
                 seen_pages.add(target)
+                logger.info('Loading page %d: %s', page_num, target)
                 try:
                     response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
                 except PlaywrightTimeoutError:
@@ -370,6 +407,7 @@ async def scrape(values):
                     raise ScrapeError(f"Target '{target}' returned HTTP status {response.status}.")
                 active_values = await inspect_and_auto_detect_selectors(page, values)
                 await scrape_page_releases(page, context, active_values, releases, seen_detail_urls, origin)
+                logger.info('Found %d unique releases so far', len(releases))
                 next_link = await field(page, active_values.get('next_selector'), 'href')
                 if not next_link:
                     break
@@ -387,6 +425,7 @@ async def scrape(values):
                 session.add(Release(**data))
                 added += 1
         session.add(ScraperLog(status='success', items_added=added))
+    logger.info('Scrape completed: %d new releases added to database.', added)
     return added
 
 
