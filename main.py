@@ -113,13 +113,24 @@ def health():
 def settings_page(request: Request):
     values = settings()
     query = request.query_params.get('q', '').strip()
+    try:
+        page_num = max(1, int(request.query_params.get('page', 1)))
+    except (TypeError, ValueError):
+        page_num = 1
+    page_size = 25
     with SessionLocal() as session:
         logs = session.scalars(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(20)).all()
         count = session.scalar(select(func.count()).select_from(Release))
         rel_query = select(Release).order_by(Release.pub_date.desc())
         if query:
             rel_query = rel_query.where(Release.title.ilike(f'%{query}%'))
-        recent_releases = session.scalars(rel_query.limit(50)).all()
+            filtered_count = session.scalar(select(func.count()).select_from(Release).where(Release.title.ilike(f'%{query}%')))
+        else:
+            filtered_count = count
+        total_pages = max(1, (filtered_count + page_size - 1) // page_size)
+        if page_num > total_pages:
+            page_num = total_pages
+        recent_releases = session.scalars(rel_query.offset((page_num - 1) * page_size).limit(page_size)).all()
     service_url = values['public_url'] or str(request.base_url).rstrip('/')
     sonarr_key = values.get('sonarr_api_key', values['api_key'])
     radarr_key = values.get('radarr_api_key', values['api_key'])
@@ -135,6 +146,9 @@ def settings_page(request: Request):
         'last_log': logs[0] if logs else None,
         'recent_releases': recent_releases,
         'search_query': query,
+        'page_num': page_num,
+        'total_pages': total_pages,
+        'filtered_count': filtered_count,
     })
 
 

@@ -147,7 +147,7 @@
       </div>
       <div class="section">
         <div class="section-head">
-          <div><h2>Indexed Releases ({{ count }})</h2><p class="muted">Latest collected torrents and magnets.</p></div>
+          <div><h2>Indexed Releases ({{ filtered_count }}{% if search_query %} of {{ count }}{% endif %})</h2><p class="muted">Latest collected torrents and magnets.</p></div>
         </div>
         <form method="get" action="/settings" style="margin-bottom:14px;display:flex;gap:8px;">
           <input name="q" value="{{ search_query }}" placeholder="Filter releases..." style="flex:1;min-height:36px;padding:6px 10px;font-size:12px;">
@@ -176,6 +176,21 @@
             </tbody>
           </table>
         </div>
+        {% if total_pages > 1 %}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12px;">
+          <div>
+            {% if page_num > 1 %}
+              <a class="button compact" href="/settings?page={{ page_num - 1 }}{% if search_query %}&q={{ search_query }}{% endif %}" style="text-decoration:none;margin-right:4px;">&larr; Prev</a>
+            {% endif %}
+          </div>
+          <span class="muted">Page <b>{{ page_num }}</b> of <b>{{ total_pages }}</b></span>
+          <div>
+            {% if page_num < total_pages %}
+              <a class="button compact" href="/settings?page={{ page_num + 1 }}{% if search_query %}&q={{ search_query }}{% endif %}" style="text-decoration:none;margin-left:4px;">Next &rarr;</a>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
         {% else %}
           <p class="empty">No releases found.</p>
         {% endif %}
