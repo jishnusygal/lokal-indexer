@@ -112,9 +112,14 @@ def health():
 @app.get('/settings', dependencies=[Depends(admin)])
 def settings_page(request: Request):
     values = settings()
+    query = request.query_params.get('q', '').strip()
     with SessionLocal() as session:
         logs = session.scalars(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(20)).all()
         count = session.scalar(select(func.count()).select_from(Release))
+        rel_query = select(Release).order_by(Release.pub_date.desc())
+        if query:
+            rel_query = rel_query.where(Release.title.ilike(f'%{query}%'))
+        recent_releases = session.scalars(rel_query.limit(50)).all()
     service_url = values['public_url'] or str(request.base_url).rstrip('/')
     sonarr_key = values.get('sonarr_api_key', values['api_key'])
     radarr_key = values.get('radarr_api_key', values['api_key'])
@@ -128,6 +133,8 @@ def settings_page(request: Request):
         'sonarr_caps_url': f'{indexer_base_url}?t=caps&apikey={sonarr_key}',
         'radarr_caps_url': f'{indexer_base_url}?t=caps&apikey={radarr_key}',
         'last_log': logs[0] if logs else None,
+        'recent_releases': recent_releases,
+        'search_query': query,
     })
 
 
