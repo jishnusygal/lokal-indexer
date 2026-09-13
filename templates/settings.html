@@ -33,6 +33,7 @@
   <section class="metrics" aria-label="Service metrics">
     <div><span>Cached releases</span><strong>{{ count }}</strong></div>
     <div><span>Scraping</span><span class="badge {{ 'ok' if values.target_url else 'muted' }}">{{ 'Active' if values.target_url else 'Paused' }}</span></div>
+    <div><span>API access</span><span class="badge {{ 'ok' if values.api_key else 'muted' }}">{{ 'Ready' if values.api_key else 'Revoked' }}</span></div>
     <div><span>Telegram</span><span class="badge {{ 'ok' if values.telegram_bot_token and values.telegram_chat_id else 'muted' }}">{{ 'On' if values.telegram_bot_token and values.telegram_chat_id else 'Off' }}</span></div>
     <div><span>Webhook</span><span class="badge {{ 'ok' if values.webhook_url else 'muted' }}">{{ 'On' if values.webhook_url else 'Off' }}</span></div>
   </section>
@@ -47,6 +48,8 @@
   </div>
 
   {% if saved == '1' %}<p class="notice success" role="status">Saved. New settings are active.</p>{% endif %}
+  {% if saved == 'api-key-regenerated' %}<p class="notice success" role="status">API key regenerated. Update Prowlarr before using the indexer again.</p>{% endif %}
+  {% if saved == 'api-key-revoked' %}<p class="notice success" role="status">API key revoked. All indexer access is disabled until you generate a new key.</p>{% endif %}
   {% if saved == 'password' %}<p class="notice success" role="status">Password changed.</p>{% endif %}
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   {% if last_log and last_log.error_message %}<p class="error" role="alert">{{ last_log.error_message }}</p>{% endif %}
@@ -57,26 +60,17 @@
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <div class="section">
           <div class="section-head">
-            <div><h2>Indexer Endpoints</h2><p class="muted">Same base URL for both apps. Each needs its own API key.</p></div>
+            <div><h2>Indexer Endpoints</h2><p class="muted">Use one Lokal Indexer key in Prowlarr. Prowlarr shares the indexer with Sonarr and Radarr.</p></div>
+            <button class="compact" type="button" data-open-api-key>Manage API access</button>
           </div>
           <div class="endpoint">
             <span>Indexer URL</span>
             <div><input readonly value="{{ indexer_base_url }}" title="Paste this into both Sonarr and Radarr's indexer URL field."></div>
           </div>
           <p class="help">Use Torznab category <b>5000</b> for Sonarr (TV) and <b>2000</b> for Radarr (Movies) when adding this indexer.</p>
-          <div class="apps">
-            <div class="appbox">
-              <h3>Sonarr</h3>
-              <div class="endpoint"><span>Current API key</span><div><input class="mask" readonly type="password" value="{{ values.sonarr_api_key }}" title="Paste this into Sonarr's API key field."></div></div>
-              <div class="endpoint"><label for="sonarr_api_key">Rotate key</label><div><input id="sonarr_api_key" name="sonarr_api_key" type="password" autocomplete="off" minlength="16" maxlength="256" placeholder="Leave blank to keep current key" title="Leave blank to keep the current key. New keys must be 16-256 characters."></div></div>
-              <a class="test-link" href="{{ sonarr_caps_url }}" target="_blank" rel="noopener" title="Open the capabilities feed in a new tab to verify it responds.">Verify feed in browser &#8599;</a>
-            </div>
-            <div class="appbox">
-              <h3>Radarr</h3>
-              <div class="endpoint"><span>Current API key</span><div><input class="mask" readonly type="password" value="{{ values.radarr_api_key }}" title="Paste this into Radarr's API key field."></div></div>
-              <div class="endpoint"><label for="radarr_api_key">Rotate key</label><div><input id="radarr_api_key" name="radarr_api_key" type="password" autocomplete="off" minlength="16" maxlength="256" placeholder="Leave blank to keep current key" title="Leave blank to keep the current key. New keys must be 16-256 characters."></div></div>
-              <a class="test-link" href="{{ radarr_caps_url }}" target="_blank" rel="noopener" title="Open the capabilities feed in a new tab to verify it responds.">Verify feed in browser &#8599;</a>
-            </div>
+          <div class="access-summary">
+            <span class="access-indicator {{ 'active' if values.api_key else 'revoked' }}"></span>
+            <div><strong>{{ 'API access active' if values.api_key else 'API access revoked' }}</strong><p>{{ 'Prowlarr can authenticate with the shared Lokal Indexer key.' if values.api_key else 'Generate a new key before connecting Prowlarr.' }}</p></div>
           </div>
         </div>
         <div class="section">
@@ -202,5 +196,32 @@
     <span class="muted">Torznab indexer for Sonarr &amp; Radarr</span>
   </footer>
 </main>
+<dialog class="api-dialog" data-api-dialog aria-labelledby="api-dialog-title">
+  <div class="dialog-head"><div><p class="eyebrow">SECURITY</p><h2 id="api-dialog-title">API access</h2></div><button class="icon-button" type="button" data-close-api-key aria-label="Close API access dialog">&#10005;</button></div>
+  <p class="dialog-copy">This single key authenticates Prowlarr, Sonarr, and Radarr to Lokal Indexer. Regenerating it immediately invalidates the previous key.</p>
+  <label for="lokal_api_key">Lokal Indexer API key</label>
+  <div class="key-field"><input id="lokal_api_key" type="password" readonly value="{{ values.api_key }}" placeholder="No active key"><button class="compact" type="button" data-toggle-api-key>{{ 'Reveal' if values.api_key else 'Unavailable' }}</button></div>
+  <div class="dialog-actions">
+    <form action="/account/api-key" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="regenerate">
+      <button class="primary" type="submit" data-regenerate-api-key>{{ 'Regenerate key' if values.api_key else 'Generate key' }}</button>
+    </form>
+    {% if values.api_key %}<form action="/account/api-key" method="post" onsubmit="return confirm('Revoke this API key? Prowlarr, Sonarr, and Radarr will lose access immediately.');"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="revoke"><button class="danger-button" type="submit">Revoke access</button></form>{% endif %}
+  </div>
+  <p class="dialog-foot">After generating a key, update it in Prowlarr. Prowlarr will distribute the indexer to Sonarr and Radarr.</p>
+</dialog>
+<script nonce="{{ csp_nonce }}">
+(() => {
+  const dialog = document.querySelector('[data-api-dialog]');
+  const key = document.querySelector('#lokal_api_key');
+  document.querySelector('[data-open-api-key]').addEventListener('click', () => dialog.showModal());
+  document.querySelector('[data-close-api-key]').addEventListener('click', () => dialog.close());
+  document.querySelector('[data-toggle-api-key]').addEventListener('click', (event) => {
+    key.type = key.type === 'password' ? 'text' : 'password';
+    event.currentTarget.textContent = key.type === 'password' ? 'Reveal' : 'Hide';
+  });
+  dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+})();
+</script>
 </body>
 </html>

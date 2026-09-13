@@ -25,6 +25,10 @@ def test_admin_settings_csrf_and_schedule(service):
     assert client.get('/health').json() == {'status': 'ok'}
     assert client.get('/settings').status_code == 401
     auth, token = admin_form(client, path)
+    page = client.get('/settings', auth=auth)
+    assert 'data-open-api-key' in page.text
+    assert '<script nonce="' in page.text
+    assert "script-src 'nonce-" in page.headers['content-security-policy']
     assert client.post('/settings', auth=auth, data={'sync_interval': '2'}).status_code == 403
     response = client.post('/settings', auth=auth, data={'csrf': token, 'sync_interval': '2', 'api_key': 'x' * 32})
     assert response.status_code == 200
@@ -37,6 +41,22 @@ def test_admin_settings_csrf_and_schedule(service):
     assert client.post('/sync', auth=auth, data={'csrf': token}, follow_redirects=False).status_code == 303
 
 
+def test_api_key_can_be_regenerated_and_revoked(service):
+    client, _, path = service
+    auth, token = admin_form(client, path)
+    original = config.settings()['api_key']
+    response = client.post('/account/api-key', auth=auth, data={'csrf': token, 'action': 'regenerate'}, follow_redirects=False)
+    assert response.status_code == 303
+    generated = config.settings()['api_key']
+    assert generated != original and len(generated) >= 32
+    assert client.get('/api', params={'t': 'caps', 'apikey': original}).status_code == 401
+    assert client.get('/api', params={'t': 'caps', 'apikey': generated}).status_code == 200
+    response = client.post('/account/api-key', auth=auth, data={'csrf': token, 'action': 'revoke'}, follow_redirects=False)
+    assert response.status_code == 303
+    assert config.settings()['api_key'] == ''
+    assert client.get('/api', params={'t': 'caps', 'apikey': generated}).status_code == 401
+
+
 def test_api_filters_xml_pagination_download(service):
     client, factory, path = service
     key = config.settings()['api_key']
@@ -47,13 +67,13 @@ def test_api_filters_xml_pagination_download(service):
     digest, size = scraper.torrent_metadata(torrent)
     filename = scraper.save_torrent(digest, torrent)
     with factory.begin() as session:
-        session.add(Release(id=digest, title='A & B.S01E02.100%', category='tv', size=size,
+        session.add(Release(id=digest, title='A & B S01E02 100%', category='tv', size=size,
                             pub_date=datetime.now(timezone.utc), season=1, episode=2, torrent_file_path=filename))
         session.add(Release(id='b' * 40, title='Movie', category='movie', size=12,
                             pub_date=datetime.now(timezone.utc), imdb_id='1234567', magnet_uri='magnet:?xt=urn:btih:' + 'b' * 40))
     params = {'t': 'tvsearch', 'apikey': key, 'season': 1, 'ep': 2, 'q': '100%', 'cat': '5000', 'limit': 1}
     root = ET.fromstring(client.get('/api', params=params).content)
-    assert root.find('channel/item/title').text == 'A & B.S01E02.100%'
+    assert root.find('channel/item/title').text == 'A & B S01E02 100%'
     assert root.find(f'channel/{{{NS}}}response').get('total') == '1'
     url = root.find('channel/item/enclosure').get('url')
     assert client.get(url).content == torrent
@@ -95,6 +115,16 @@ def test_failure_notification_and_overlap(service, monkeypatch):
 @pytest.mark.parametrize('text,expected', [('1 GiB', 1073741824), ('1.5 MB', 1500000), ('42', 42)])
 def test_sizes(text, expected):
     assert scraper.parse_size(text) == expected
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('www.1TamilMV.meme - Haiwaan (2026) Hindi HQ PreDVD - x264 - HQ Clean - AAC - 400MB.mkv',
+     'Haiwaan (2026) Hindi HQ PreDVD x264 HQ Clean AAC 400MB'),
+    ('Reacher.S04E07.1080p.WEB-DL.mkv', 'Reacher S04E07 1080p WEB DL'),
+    ('Movie (2026)', 'Movie (2026)'),
+])
+def test_normalize_release_title(text, expected):
+    assert scraper.normalize_release_title(text) == expected
 
 
 def test_invalid_torrent_and_magnet():

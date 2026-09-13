@@ -104,7 +104,7 @@ def test_browser_scrape_detail_pages(service, tmp_path):
             assert tv.size == 500000000
             m1 = session.get(Release, '1111111111111111111111111111111111111111')
             assert m1.category == 'movie' and m1.size == 2147483648
-            assert m1.title == 'Ghamasaan.2026.1080p.WEB-DL'
+            assert m1.title == 'Ghamasaan 2026 1080p WEB DL'
     finally:
         server.shutdown()
         server.server_close()
@@ -153,8 +153,8 @@ def test_browser_scrape_detail_pages_with_pagination(service, tmp_path):
             assert session.scalar(select(func.count()).select_from(Release)) == 2
             r1 = session.get(Release, '4444444444444444444444444444444444444444')
             r2 = session.get(Release, '5555555555555555555555555555555555555555')
-            assert r1.title == 'Movie.1.1080p'
-            assert r2.title == 'Movie.2.1080p'
+            assert r1.title == 'Movie 1 1080p'
+            assert r2.title == 'Movie 2 1080p'
     finally:
         server.shutdown()
         server.server_close()

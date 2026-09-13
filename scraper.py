@@ -201,6 +201,16 @@ async def resolve_size(row, values, magnet, title, fallback_title):
 GENERIC_TITLES = {'magnet', 'download', 'torrent', 'direct link', 'link', 'get torrent', 'click here', 'file'}
 
 
+def normalize_release_title(title):
+    """Remove source branding and file syntax while keeping filterable tags."""
+    normalized = title.strip()
+    normalized = re.sub(r'(?i)^www\.[^\s]+\s*[-|:]\s*', '', normalized)
+    normalized = re.sub(r'(?i)\.(?:mkv|mp4|avi|mov|wmv|webm|ts)$', '', normalized)
+    normalized = re.sub(r'[._]+', ' ', normalized)
+    normalized = re.sub(r'\s*-\s*', ' ', normalized)
+    return re.sub(r'\s+', ' ', normalized).strip()
+
+
 async def extract_release(row, context, page, values, fallback_title='', fallback_date=None):
     title = await field(row, values.get('title_selector'))
     magnet = await field(row, values.get('magnet_selector') or 'a[href^="magnet:"]', 'href')
@@ -242,6 +252,9 @@ async def extract_release(row, context, page, values, fallback_title='', fallbac
             title = (await row.inner_text()).strip()
 
     if not title or len(title) > 1000:
+        raise ScrapeError('Release has a missing or oversized title.')
+    title = normalize_release_title(title)
+    if not title:
         raise ScrapeError('Release has a missing or oversized title.')
 
     match = re.search(r'(?i)\bS(\d{1,3})(?:E(\d{1,4}))?\b', title)

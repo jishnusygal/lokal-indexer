@@ -89,11 +89,13 @@ app = FastAPI(title='Lokal Indexer', lifespan=lifespan, docs_url=None, redoc_url
 
 @app.middleware('http')
 async def security_headers(request, call_next):
+    csp_nonce = secrets.token_urlsafe(24)
+    request.state.csp_nonce = csp_nonce
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = f"default-src 'none'; script-src 'nonce-{csp_nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'"
     return response
 
 
@@ -139,6 +141,7 @@ def settings_page(request: Request):
         'values': values, 'logs': logs, 'count': count, 'saved': request.query_params.get('saved'),
         'error': request.query_params.get('error'),
         'csrf': request.app.state.signer.dumps(secrets.token_urlsafe(16)),
+        'csp_nonce': request.state.csp_nonce,
         'running': request.app.state.worker.lock.locked(),
         'indexer_base_url': indexer_base_url,
         'sonarr_caps_url': f'{indexer_base_url}?t=caps&apikey={sonarr_key}',
@@ -178,6 +181,25 @@ async def save_settings(request: Request):
             session.merge(Setting(key=key, value=value))
     schedule(request.app, values['sync_interval'])
     return RedirectResponse('/settings?saved=1', status_code=303)
+
+
+@app.post('/account/api-key', dependencies=[Depends(admin)])
+async def manage_api_key(request: Request):
+    form = await request.form(max_fields=10)
+    check_csrf(request, str(form.get('csrf', '')))
+    action = str(form.get('action', ''))
+    if action == 'regenerate':
+        value = secrets.token_urlsafe(32)
+        message = 'regenerated'
+    elif action == 'revoke':
+        value = ''
+        message = 'revoked'
+    else:
+        return RedirectResponse('/settings?error=Invalid+API+key+action', status_code=303)
+    with SessionLocal.begin() as session:
+        for key in ('api_key', 'sonarr_api_key', 'radarr_api_key'):
+            session.merge(Setting(key=key, value=value))
+    return RedirectResponse(f'/settings?saved=api-key-{message}', status_code=303)
 
 
 @app.post('/account/password', dependencies=[Depends(admin)])
@@ -268,7 +290,7 @@ def api(request: Request):
             total = session.scalar(select(func.count()).select_from(Release).where(*conditions))
             releases = session.scalars(select(Release).where(*conditions).order_by(Release.pub_date.desc(), Release.id).offset(offset).limit(limit)).all()
         values = settings()
-        api_key = values.get('radarr_api_key' if kind == 'movie' else 'sonarr_api_key', values['api_key'])
+        api_key = values.get('api_key') or values.get('radarr_api_key' if kind == 'movie' else 'sonarr_api_key', '')
         return xml_response(torznab.feed(releases, total, offset, values['public_url'] or str(request.base_url).rstrip('/'), api_key))
     except ValueError:
         return xml_response(torznab.error(201, 'Invalid search parameters'))
