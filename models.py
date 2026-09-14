@@ -24,6 +24,8 @@ class Release(Base):
     imdb_id: Mapped[str | None] = mapped_column(String, index=True)
     season: Mapped[int | None] = mapped_column(Integer)
     episode: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default='published')
+    run_id: Mapped[int | None] = mapped_column(Integer)
 
 class ScraperLog(Base):
     __tablename__ = 'scraper_logs'
@@ -33,3 +35,8 @@ class ScraperLog(Base):
     items_added: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
+    current_page: Mapped[int | None] = mapped_column(Integer)
+    current_page_url: Mapped[str | None] = mapped_column(Text)
+    current_detail_url: Mapped[str | None] = mapped_column(Text)
+    config_fingerprint: Mapped[str | None] = mapped_column(String)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

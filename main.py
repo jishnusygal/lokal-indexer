@@ -102,11 +102,32 @@ def schedule(app, interval):
                                 replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=60)
 
 
+MIGRATED_COLUMNS = {
+    'scraper_logs': [
+        ('duration_seconds', 'FLOAT'),
+        ('current_page', 'INTEGER'),
+        ('current_page_url', 'TEXT'),
+        ('current_detail_url', 'TEXT'),
+        ('config_fingerprint', 'VARCHAR'),
+        ('ended_at', 'DATETIME'),
+    ],
+    'releases': [
+        ('status', "VARCHAR NOT NULL DEFAULT 'published'"),
+        ('run_id', 'INTEGER'),
+    ],
+}
+
+
 def migrate_schema():
     with engine.begin() as connection:
-        columns = connection.execute(text('PRAGMA table_info(scraper_logs)')).all()
-        if columns and not any(row[1] == 'duration_seconds' for row in columns):
-            connection.execute(text('ALTER TABLE scraper_logs ADD COLUMN duration_seconds FLOAT'))
+        for table, columns in MIGRATED_COLUMNS.items():
+            existing_columns = connection.execute(text(f'PRAGMA table_info({table})')).all()
+            if not existing_columns:
+                continue
+            existing = {row[1] for row in existing_columns}
+            for name, ddl_type in columns:
+                if name not in existing:
+                    connection.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {ddl_type}'))
 
 
 @asynccontextmanager
@@ -393,7 +414,7 @@ def api(request: Request):
         limit, offset = int(params.get('limit', '100')), int(params.get('offset', '0'))
         if not 1 <= limit <= 100 or offset < 0:
             raise ValueError()
-        conditions = []
+        conditions = [Release.status == 'published']
         if kind != 'search':
             conditions.append(Release.category == ('movie' if kind == 'movie' else 'tv'))
         if params.get('cat'):
@@ -428,7 +449,7 @@ def download(release_id: str, request: Request):
         raise HTTPException(401, 'Incorrect API key')
     with SessionLocal() as session:
         release = session.get(Release, release_id)
-    if release is None:
+    if release is None or release.status != 'published':
         raise HTTPException(404, 'Release not found')
     if release.torrent_file_path:
         root = TORRENT_DIR.resolve()

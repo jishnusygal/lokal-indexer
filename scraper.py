@@ -6,14 +6,13 @@ import logging
 import os
 import re
 import tempfile
-import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import bencodepy
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
-from sqlalchemy import delete, select
-from config import http_url, settings
+from sqlalchemy import delete, select, update
+from config import http_url, scrape_fingerprint, settings
 from database import SessionLocal, TORRENT_DIR
 from models import Release, ScraperLog, utcnow
 from notifier import notify_failure
@@ -26,6 +25,32 @@ MAX_ROWS = 2000
 
 class ScrapeError(ValueError):
     """A safe, actionable error message suitable for logs and notifications."""
+
+
+def format_scrape_error(exc):
+    """Sanitize an exception into a message safe to persist and notify with."""
+    if isinstance(exc, ScrapeError):
+        return str(exc)
+    if isinstance(exc, PlaywrightTimeoutError):
+        return f'TimeoutError: scraper timed out on {type(exc).__name__}. Check target availability and page load.'
+    return f'{type(exc).__name__}: scrape failed. Check target availability, CSS selectors, and release metadata.'
+
+
+def as_utc(date):
+    """Normalize to a tz-aware UTC datetime, tolerant of SQLite round-trips dropping tzinfo."""
+    return date.replace(tzinfo=timezone.utc) if date.tzinfo is None else date.astimezone(timezone.utc)
+
+
+def elapsed_seconds(start, end):
+    return (as_utc(end) - as_utc(start)).total_seconds()
+
+
+def finalize_run(run, status, message=None):
+    run.status = status
+    run.ended_at = utcnow()
+    run.duration_seconds = elapsed_seconds(run.timestamp, run.ended_at)
+    if message is not None:
+        run.error_message = message
 
 
 async def inspect_and_auto_detect_selectors(page, values):
@@ -349,7 +374,7 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
         await detail_page.close()
 
 
-async def scrape_page_releases(page, context, values, releases, seen_detail_urls, origin):
+async def scrape_page_releases(page, context, values, releases, seen_detail_urls, origin, run_id):
     try:
         await page.locator(values['row_selector']).first.wait_for(state='attached', timeout=30000)
     except PlaywrightTimeoutError:
@@ -379,6 +404,8 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
             topic_title = (await field(row, values.get('title_selector'))) or (await row.inner_text() or '').strip()
             topic_date_text = await field(row, values.get('date_selector'), 'datetime')
             topic_date = datetime.fromisoformat(topic_date_text.replace('Z', '+00:00')) if topic_date_text else None
+            with SessionLocal.begin() as session:
+                session.execute(update(ScraperLog).where(ScraperLog.id == run_id).values(current_detail_url=detail_url))
             try:
                 await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
             except Exception as err:
@@ -390,63 +417,119 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
             merge_release(releases, rel)
 
 
+def resolve_run(values, fingerprint):
+    """Reuse a matching in-progress run, abandon a stale one, or start fresh.
+
+    Returns (run_id, start_page, start_target, stale_torrent_paths). Abandoning a stale
+    run deletes its still-staged releases; their torrent filenames are returned for the
+    caller to unlink from disk (outside this transaction).
+    """
+    target0 = http_url(values['target_url'])
+    stale_torrent_paths = []
+    with SessionLocal.begin() as session:
+        candidate = session.scalar(
+            select(ScraperLog).where(ScraperLog.status.in_(('running', 'partial')))
+            .order_by(ScraperLog.id.desc()).limit(1))
+        if candidate and candidate.config_fingerprint == fingerprint:
+            candidate.status = 'running'
+            return candidate.id, candidate.current_page or 1, candidate.current_page_url or target0, stale_torrent_paths
+        if candidate:
+            finalize_run(candidate, 'failed', 'Superseded by configuration change')
+            stale_torrent_paths = [path for (path,) in session.execute(
+                select(Release.torrent_file_path).where(Release.run_id == candidate.id, Release.status == 'staged')
+            ) if path]
+            session.execute(delete(Release).where(Release.run_id == candidate.id, Release.status == 'staged'))
+        run = ScraperLog(status='running', items_added=0, current_page=1,
+                          current_page_url=target0, config_fingerprint=fingerprint)
+        session.add(run)
+        session.flush()
+        return run.id, 1, target0, stale_torrent_paths
+
+
 async def scrape(values):
-    target = http_url(values['target_url'])
-    origin = urlsplit(target).netloc
-    releases = {}
+    origin = urlsplit(http_url(values['target_url'])).netloc
+    fingerprint = scrape_fingerprint(values)
+    run_id, start_page, target, stale_torrent_paths = resolve_run(values, fingerprint)
+    for name in stale_torrent_paths:
+        (TORRENT_DIR / name).unlink(missing_ok=True)
+
     seen_pages = set()
     seen_detail_urls = set()
+    parsed_any = False
     user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36')
     logger.info('Starting scrape for target: %s', target)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
-        try:
-            context = await browser.new_context(
-                user_agent=user_agent,
-                locale='en-US',
-                accept_downloads=False,
-                service_workers='block'
-            )
-            context.set_default_timeout(30000)
-            page = await context.new_page()
-            for page_num in range(1, int(values['max_pages']) + 1):
-                if target in seen_pages:
-                    break
-                seen_pages.add(target)
-                logger.info('Loading page %d: %s', page_num, target)
-                try:
-                    response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
-                except PlaywrightTimeoutError:
-                    raise ScrapeError(f"Timeout loading '{target}'. Page did not complete loading within 60 seconds.")
-                except Exception as exc:
-                    raise ScrapeError(f"Failed to navigate to '{target}': {type(exc).__name__}")
-                if response is None:
-                    raise ScrapeError(f"No response received from '{target}'.")
-                if response.status >= 400:
-                    raise ScrapeError(f"Target '{target}' returned HTTP status {response.status}.")
-                active_values = await inspect_and_auto_detect_selectors(page, values)
-                await scrape_page_releases(page, context, active_values, releases, seen_detail_urls, origin)
-                logger.info('Found %d unique releases so far', len(releases))
-                next_link = await field(page, active_values.get('next_selector'), 'href')
-                if not next_link:
-                    break
-                target = http_url(urljoin(page.url, next_link))
-                if urlsplit(target).netloc != origin:
-                    raise ScrapeError('Pagination must remain on the configured host.')
-        finally:
-            await browser.close()
-    if not releases:
-        raise ScrapeError('No valid releases parsed; check the target and selectors.')
-    with SessionLocal.begin() as session:
-        added = 0
-        for digest, data in releases.items():
-            if session.get(Release, digest) is None:
-                session.add(Release(**data))
-                added += 1
-        session.add(ScraperLog(status='success', items_added=added))
-    logger.info('Scrape completed: %d new releases added to database.', added)
-    return added
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=['--disable-dev-shm-usage'])
+            try:
+                context = await browser.new_context(
+                    user_agent=user_agent,
+                    locale='en-US',
+                    accept_downloads=False,
+                    service_workers='block'
+                )
+                context.set_default_timeout(30000)
+                page = await context.new_page()
+                for page_num in range(start_page, int(values['max_pages']) + 1):
+                    if target in seen_pages:
+                        break
+                    seen_pages.add(target)
+                    logger.info('Loading page %d: %s', page_num, target)
+                    try:
+                        response = await page.goto(target, wait_until='domcontentloaded', timeout=60000)
+                    except PlaywrightTimeoutError:
+                        raise ScrapeError(f"Timeout loading '{target}'. Page did not complete loading within 60 seconds.")
+                    except Exception as exc:
+                        raise ScrapeError(f"Failed to navigate to '{target}': {type(exc).__name__}")
+                    if response is None:
+                        raise ScrapeError(f"No response received from '{target}'.")
+                    if response.status >= 400:
+                        raise ScrapeError(f"Target '{target}' returned HTTP status {response.status}.")
+                    active_values = await inspect_and_auto_detect_selectors(page, values)
+                    page_releases = {}
+                    await scrape_page_releases(page, context, active_values, page_releases, seen_detail_urls, origin, run_id)
+                    parsed_any = parsed_any or bool(page_releases)
+                    logger.info('Found %d unique releases on page %d', len(page_releases), page_num)
+                    next_link = await field(page, active_values.get('next_selector'), 'href')
+                    next_target = None
+                    if next_link:
+                        next_target = http_url(urljoin(page.url, next_link))
+                        if urlsplit(next_target).netloc != origin:
+                            raise ScrapeError('Pagination must remain on the configured host.')
+                    with SessionLocal.begin() as session:
+                        added_this_page = 0
+                        for digest, data in page_releases.items():
+                            if session.get(Release, digest) is None:
+                                session.add(Release(**data, status='staged', run_id=run_id))
+                                added_this_page += 1
+                        run = session.get(ScraperLog, run_id)
+                        run.current_page = page_num + 1
+                        run.current_page_url = next_target
+                        run.items_added += added_this_page
+                    if not next_target:
+                        break
+                    target = next_target
+            finally:
+                await browser.close()
+
+        with SessionLocal.begin() as session:
+            run = session.get(ScraperLog, run_id)
+            if run.items_added == 0 and not parsed_any:
+                raise ScrapeError('No valid releases parsed; check the target and selectors.')
+            session.execute(update(Release).where(Release.run_id == run_id, Release.status == 'staged')
+                             .values(status='published'))
+            finalize_run(run, 'completed')
+            run.current_page_url = None
+            added = run.items_added
+        logger.info('Scrape completed: %d new releases added to database.', added)
+        return added
+    except Exception as exc:
+        message = format_scrape_error(exc)
+        with SessionLocal.begin() as session:
+            run = session.get(ScraperLog, run_id)
+            finalize_run(run, 'partial' if (run.current_page or 1) > 1 else 'failed', message)
+        raise
 
 
 class ScraperWorker:
@@ -460,26 +543,23 @@ class ScraperWorker:
             values = settings()
             if not values.get('target_url'):
                 return  # An unconfigured installation is deliberately idle.
-            started = time.monotonic()
+            started = utcnow()
             try:
                 async with asyncio.timeout(900):
                     await scrape(values)
-                duration = time.monotonic() - started
-                with SessionLocal.begin() as session:
-                    log = session.scalar(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(1))
-                    if log and log.status == 'success':
-                        log.duration_seconds = duration
             except Exception as exc:
-                duration = time.monotonic() - started
-                if isinstance(exc, ScrapeError):
-                    message = str(exc)
-                elif isinstance(exc, PlaywrightTimeoutError):
-                    message = f'TimeoutError: scraper timed out on {type(exc).__name__}. Check target availability and page load.'
-                else:
-                    message = f'{type(exc).__name__}: scrape failed. Check target availability, CSS selectors, and release metadata.'
+                message = format_scrape_error(exc)
                 with SessionLocal.begin() as session:
-                    session.add(ScraperLog(status='failure', items_added=0,
-                                           error_message=message, duration_seconds=duration))
+                    run = session.scalar(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(1))
+                    if run is None:
+                        # scrape() never reached its own run-creation step this attempt.
+                        ended = utcnow()
+                        session.add(ScraperLog(status='failed', items_added=0, error_message=message,
+                                               ended_at=ended, duration_seconds=elapsed_seconds(started, ended)))
+                    elif run.status == 'running':
+                        # scrape() was cancelled (e.g. the timeout below) before it could
+                        # finalize its own row; it was left checkpointed mid-run.
+                        finalize_run(run, 'partial' if (run.current_page or 1) > 1 else 'failed', message)
                 await asyncio.to_thread(notify_failure, message)
             finally:
                 with SessionLocal.begin() as session:

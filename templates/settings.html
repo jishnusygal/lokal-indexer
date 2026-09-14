@@ -50,6 +50,10 @@
     <span class="muted">Syncs every {{ values.sync_interval }} min</span>
   </div>
 
+  {% if last_log and last_log.status in ['running', 'partial'] and not running %}
+    <p class="notice warn" role="status">Previous run interrupted{% if last_log.items_added %}: {{ last_log.items_added }} release(s) staged and not yet visible to Sonarr/Radarr{% endif %}. It will resume automatically on the next sync.</p>
+  {% endif %}
+
   {% if saved == '1' %}<p class="notice success" role="status">Saved. New settings are active.</p>{% endif %}
   {% if saved == 'api-key-regenerated' %}<p class="notice success" role="status">API key regenerated. Update Prowlarr before using the indexer again.</p>{% endif %}
   {% if saved == 'api-key-revoked' %}<p class="notice success" role="status">API key revoked. All indexer access is disabled until you generate a new key.</p>{% endif %}
@@ -133,7 +137,7 @@
             <thead><tr><th>Time</th><th>Status</th><th>Added</th><th>Duration</th><th>Details</th></tr></thead>
             <tbody>
               {% for log in logs %}
-              <tr><td>{{ log.timestamp.strftime('%m-%d %H:%M') }}</td><td><span class="badge status-{{ log.status }}">{{ log.status }}</span></td><td>{{ log.items_added }}</td><td>{{ ('%.1fs' | format(log.duration_seconds)) if log.duration_seconds is not none else '-' }}</td><td>{{ log.error_message or 'Completed' }}</td></tr>
+              <tr><td>{{ log.timestamp.strftime('%m-%d %H:%M') }}</td><td><span class="badge status-{{ log.status }}">{{ log.status }}</span></td><td>{{ log.items_added }}</td><td>{{ ('%.1fs' | format(log.duration_seconds)) if log.duration_seconds is not none else '-' }}</td><td>{% if log.error_message %}{{ log.error_message }}{% elif log.status in ['running', 'partial'] %}Page {{ log.current_page or 1 }}{% if log.current_detail_url %}: {{ log.current_detail_url }}{% endif %}{% else %}Completed{% endif %}</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -158,7 +162,7 @@
             <tbody>
               {% for rel in recent_releases %}
               <tr>
-                <td style="max-width:240px;word-break:break-word;font-size:12px;"><b>{{ rel.title }}</b></td>
+                <td style="max-width:240px;word-break:break-word;font-size:12px;"><b>{{ rel.title }}</b>{% if rel.status == 'staged' %} <span class="badge muted" title="Not yet published; this release belongs to a scrape run that hasn't finished.">staged</span>{% endif %}</td>
                 <td><span class="badge">{{ rel.category }}</span></td>
                 <td style="white-space:nowrap;font-size:11px;">{{ (rel.size / (1024*1024*1024)) | round(2) if rel.size >= 1073741824 else (rel.size / (1024*1024)) | round(1) }} {{ 'GB' if rel.size >= 1073741824 else 'MB' }}</td>
                 <td style="white-space:nowrap;">

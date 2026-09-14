@@ -114,6 +114,29 @@ def test_api_filters_xml_pagination_download(service):
     assert client.get(f'/download/{digest}', params={'apikey': key}).status_code == 404
 
 
+def test_staged_releases_hidden_from_api_and_download(service):
+    client, factory, path = service
+    key = config.settings()['api_key']
+    staged_torrent = bencodepy.encode({b'info': {b'name': b'staged', b'length': 10, b'piece length': 16384, b'pieces': b's' * 20}})
+    staged_digest, staged_size = scraper.torrent_metadata(staged_torrent)
+    staged_filename = scraper.save_torrent(staged_digest, staged_torrent)
+    published_torrent = bencodepy.encode({b'info': {b'name': b'published', b'length': 10, b'piece length': 16384, b'pieces': b'p' * 20}})
+    published_digest, published_size = scraper.torrent_metadata(published_torrent)
+    published_filename = scraper.save_torrent(published_digest, published_torrent)
+    with factory.begin() as session:
+        session.add(Release(id=staged_digest, title='Staged Release', category='movie', size=staged_size,
+                            pub_date=datetime.now(timezone.utc), torrent_file_path=staged_filename,
+                            status='staged', run_id=1))
+        session.add(Release(id=published_digest, title='Published Release', category='movie', size=published_size,
+                            pub_date=datetime.now(timezone.utc), torrent_file_path=published_filename,
+                            status='published'))
+    root = ET.fromstring(client.get('/api', params={'apikey': key}).content)
+    assert [item.text for item in root.findall('channel/item/title')] == ['Published Release']
+    assert root.find(f'channel/{{{NS}}}response').get('total') == '1'
+    assert client.get(f'/download/{staged_digest}', params={'apikey': key}).status_code == 404
+    assert client.get(f'/download/{published_digest}', params={'apikey': key}).status_code == 200
+
+
 def test_failure_notification_and_overlap(service, monkeypatch):
     _, factory, _ = service
     alerts = []
@@ -127,7 +150,7 @@ def test_failure_notification_and_overlap(service, monkeypatch):
     asyncio.run(worker.run())
     with factory() as session:
         log = session.scalar(select(ScraperLog))
-        assert log.status == 'failure'
+        assert log.status == 'failed'
         assert 'secret' not in log.error_message
     assert len(alerts) == 1
     async def overlap():
@@ -159,6 +182,16 @@ def test_invalid_torrent_and_magnet():
         scraper.torrent_metadata(b'<html>Login required</html>')
     with pytest.raises(ValueError):
         scraper.magnet_hash('magnet:?xt=urn:btih:nope')
+
+
+def test_scrape_fingerprint_ignores_unrelated_settings():
+    base = dict(config.DEFAULTS, target_url='https://example.test/list')
+    a = {**base, 'telegram_bot_token': 'one', 'sync_interval': '30'}
+    b = {**base, 'telegram_bot_token': 'two', 'sync_interval': '90', 'webhook_url': 'https://b.example.test'}
+    assert config.scrape_fingerprint(a) == config.scrape_fingerprint(b)
+    for key in config.FINGERPRINT_KEYS:
+        changed = {**base, key: base.get(key, '') + '-changed'}
+        assert config.scrape_fingerprint(changed) != config.scrape_fingerprint(base)
 
 
 def test_notifier_reads_dynamic_credentials(service, monkeypatch):

@@ -1,6 +1,10 @@
+import hashlib
+import json
 import secrets
 from urllib.parse import urlsplit
+
 from sqlalchemy import select
+
 from database import SessionLocal
 from models import Setting
 
@@ -11,6 +15,17 @@ DEFAULTS = {
     'torrent_selector': 'a[href$=".torrent"]', 'magnet_selector': 'a[href^="magnet:"]',
     'size_selector': '.size', 'date_selector': 'time', 'next_selector': '', 'max_pages': '5',
 }
+
+# Settings that determine what a scrape run actually crawls/extracts. Changing any of
+# these invalidates an in-progress run's checkpoint; changing anything else (sync
+# interval, notification settings, API keys) does not.
+FINGERPRINT_KEYS = ('target_url', 'row_selector', 'title_selector', 'detail_selector',
+                     'detail_row_selector', 'torrent_selector', 'magnet_selector',
+                     'size_selector', 'date_selector', 'next_selector', 'max_pages')
+
+def scrape_fingerprint(values):
+    payload = json.dumps({key: values.get(key, '') for key in FINGERPRINT_KEYS}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 def settings():
     with SessionLocal() as session:
