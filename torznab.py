@@ -18,7 +18,7 @@ def caps():
     SubElement(root, 'server', version='1.0', title='Lokal Indexer')
     SubElement(root, 'limits', max='100', default='100')
     searching = SubElement(root, 'searching')
-    for name, params in [('search', 'q'), ('tv-search', 'q,season,ep'), ('movie-search', 'q,imdbid')]:
+    for name, params in [('search', 'q'), ('tv-search', 'q,season,ep'), ('movie-search', 'q')]:
         SubElement(searching, name, available='yes', supportedParams=params)
     categories = SubElement(root, 'categories')
     SubElement(categories, 'category', id='2000', name='Movies')
