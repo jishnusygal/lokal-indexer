@@ -129,22 +129,8 @@
       </form>
     </section>
     <aside class="panel">
-      <div class="section">
-        <div class="section-head"><div><h2>Recent Scrapes</h2><p class="muted">Latest runs in UTC.</p></div></div>
-        {% if logs %}
-        <div class="logs-wrap">
-          <table class="logs">
-            <thead><tr><th>Time</th><th>Status</th><th>Added</th><th>Duration</th><th>Details</th></tr></thead>
-            <tbody>
-              {% for log in logs %}
-              <tr><td>{{ log.timestamp.strftime('%m-%d %H:%M') }}</td><td><span class="badge status-{{ log.status }}">{{ log.status }}</span></td><td>{{ log.items_added }}</td><td>{{ ('%.1fs' | format(log.duration_seconds)) if log.duration_seconds is not none else '-' }}</td><td>{% if log.error_message %}{{ log.error_message }}{% elif log.status in ['running', 'partial'] %}Page {{ log.current_page or 1 }}{% if log.current_detail_url %}: {{ log.current_detail_url }}{% endif %}{% else %}Completed{% endif %}</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-          <p class="empty">No scrape history yet.</p>
-        {% endif %}
+      <div class="section" id="recent-scrapes" data-poll-url="/settings/scrapes">
+        {% include '_recent_scrapes.html' %}
       </div>
       <div class="section">
         <div class="section-head">
@@ -228,6 +214,20 @@
     event.currentTarget.textContent = key.type === 'password' ? 'Reveal' : 'Hide';
   });
   dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+})();
+(() => {
+  const section = document.querySelector('#recent-scrapes');
+  if (!section) return;
+  const url = section.dataset.pollUrl;
+  setInterval(async () => {
+    if (document.hidden) return;
+    try {
+      const response = await fetch(url);
+      if (response.ok) section.innerHTML = await response.text();
+    } catch (err) {
+      // Network hiccup; next tick retries.
+    }
+  }, 5000);
 })();
 </script>
 </body>

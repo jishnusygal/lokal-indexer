@@ -180,7 +180,7 @@ async def security_headers(request, call_next):
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = f"default-src 'none'; script-src 'nonce-{csp_nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = f"default-src 'none'; script-src 'nonce-{csp_nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'"
     return response
 
 
@@ -300,6 +300,13 @@ def settings_page(request: Request):
         'total_pages': total_pages,
         'filtered_count': filtered_count,
     })
+
+
+@app.get('/settings/scrapes', dependencies=[Depends(admin)])
+def scrapes_fragment(request: Request):
+    with SessionLocal() as session:
+        logs = session.scalars(select(ScraperLog).order_by(ScraperLog.id.desc()).limit(20)).all()
+    return templates.TemplateResponse(request=request, name='_recent_scrapes.html', context={'logs': logs})
 
 
 @app.post('/settings', dependencies=[Depends(admin)])
