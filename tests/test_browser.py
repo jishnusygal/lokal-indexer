@@ -1,5 +1,6 @@
 """Real browser integration test against an isolated local HTTP server."""
 import asyncio
+import json
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -265,6 +266,90 @@ def test_browser_scrape_abandons_stale_run_on_config_change(service, tmp_path):
             assert releases[0].run_id == runs[1].id
             assert releases[0].status == 'published'
         assert not torrent_path.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_browser_scrape_checkpoints_within_page_and_resumes(service, tmp_path, monkeypatch):
+    """A run cancelled mid-page (the worker's 900s timeout firing between detail
+    pages) must not lose releases already extracted, and a resumed run must skip
+    the detail pages it already finished instead of re-crawling the whole page."""
+    _, factory, _ = service
+    site = tmp_path / 'site_mid_page'
+    site.mkdir()
+    (site / 'index.html').write_text('''<html><body>
+    <div class="topic-row"><a class="topic-link" href="topic1.html">Topic One</a></div>
+    <div class="topic-row"><a class="topic-link" href="topic2.html">Topic Two</a></div>
+    <div class="topic-row"><a class="topic-link" href="topic3.html">Topic Three</a></div>
+    </body></html>''')
+    for i, digit in enumerate('123', start=1):
+        (site / f'topic{i}.html').write_text(f'''<html><body>
+        <h1>Topic {i}</h1>
+        <a href="magnet:?xt=urn:btih:{digit * 40}&dn=Topic.{i}&xl=1000000">Magnet</a>
+        </body></html>''')
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietHandler, directory=str(site)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f'http://127.0.0.1:{server.server_port}'
+        values = {
+            **config.settings(),
+            'target_url': f'{base_url}/index.html',
+            'row_selector': '.topic-row',
+            'title_selector': '.topic-link, h1',
+            'detail_selector': '.topic-link',
+            'magnet_selector': 'a[href^="magnet:"]',
+        }
+        real_scrape_detail_page = scraper.scrape_detail_page
+        calls = []
+
+        async def spy(context, detail_url, cfg, topic_title, topic_date, run_id):
+            calls.append(detail_url)
+            extracted = await real_scrape_detail_page(context, detail_url, cfg, topic_title, topic_date, run_id)
+            if len(calls) == 2:
+                # Simulate the worker's asyncio.timeout(900) firing right after this
+                # detail page finished, before the next one starts.
+                raise asyncio.CancelledError()
+            return extracted
+        monkeypatch.setattr(scraper, 'scrape_detail_page', spy)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(scraper.scrape(values))
+
+        with factory() as session:
+            run = session.scalar(select(ScraperLog).order_by(ScraperLog.id.desc()))
+            run_id = run.id
+            # CancelledError bypasses scrape()'s own except-Exception block, so the
+            # row is left exactly as it was checkpointed mid-run, never finalized.
+            assert run.status == 'running'
+            assert run.items_added == 2
+            completed = json.loads(run.completed_detail_urls)
+            assert completed == [f'{base_url}/topic1.html']
+            staged = session.scalars(select(Release)).all()
+            assert len(staged) == 2
+            assert all(r.status == 'staged' and r.run_id == run_id for r in staged)
+            assert scraper.run_has_progress(run) is True
+
+        # Resume with the same settings; the spy no longer injects a cancellation.
+        added = asyncio.run(scraper.scrape(values))
+        assert added == 3
+        # topic1 was already completed and must not be re-fetched. topic2 was
+        # interrupted mid-attempt (never marked completed) and topic3 was never
+        # reached, so both are redone on resume.
+        assert calls == [f'{base_url}/topic1.html', f'{base_url}/topic2.html',
+                          f'{base_url}/topic2.html', f'{base_url}/topic3.html']
+        with factory() as session:
+            runs = session.scalars(select(ScraperLog).order_by(ScraperLog.id)).all()
+            assert len(runs) == 1 and runs[0].id == run_id  # same run reused, not a new row
+            assert runs[0].status == 'completed'
+            assert runs[0].completed_detail_urls is None  # reset once the page finished
+            published = session.scalars(select(Release).where(Release.status == 'published')).all()
+            assert len(published) == 3
     finally:
         server.shutdown()
         server.server_close()

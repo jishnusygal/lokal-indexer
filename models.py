@@ -38,5 +38,6 @@ class ScraperLog(Base):
     current_page: Mapped[int | None] = mapped_column(Integer)
     current_page_url: Mapped[str | None] = mapped_column(Text)
     current_detail_url: Mapped[str | None] = mapped_column(Text)
+    completed_detail_urls: Mapped[str | None] = mapped_column(Text)
     config_fingerprint: Mapped[str | None] = mapped_column(String)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

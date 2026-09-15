@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import re
@@ -51,6 +52,15 @@ def finalize_run(run, status, message=None):
     run.duration_seconds = elapsed_seconds(run.timestamp, run.ended_at)
     if message is not None:
         run.error_message = message
+
+
+def run_has_progress(run):
+    """True if a run has state worth resuming rather than discarding and restarting."""
+    return (run.current_page or 1) > 1 or run.items_added > 0 or bool(run.completed_detail_urls)
+
+
+def completed_detail_urls(run):
+    return json.loads(run.completed_detail_urls) if run.completed_detail_urls else []
 
 
 async def inspect_and_auto_detect_selectors(page, values):
@@ -191,6 +201,20 @@ def merge_release(releases, rel):
         releases[digest] = rel
 
 
+def stage_release(session, run_id, rel):
+    """Insert or merge one extracted release immediately. Returns True if newly inserted."""
+    existing = session.get(Release, rel['id'])
+    if existing is None:
+        session.add(Release(**rel, status='staged', run_id=run_id))
+        return True
+    if existing.status == 'staged' and existing.run_id == run_id:
+        if not existing.torrent_file_path and rel.get('torrent_file_path'):
+            existing.torrent_file_path = rel['torrent_file_path']
+        if not existing.magnet_uri and rel.get('magnet_uri'):
+            existing.magnet_uri = rel['magnet_uri']
+    return False
+
+
 async def resolve_size(row, values, magnet, title, fallback_title):
     raw_size = await row.get_attribute('data-size') or await field(row, values.get('size_selector'))
     if raw_size:
@@ -318,14 +342,34 @@ async def extract_release(row, context, page, values, fallback_title='', fallbac
                 imdb_id=imdb, season=season, episode=episode)
 
 
-async def scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases):
+async def scrape_detail_page(context, detail_url, values, topic_title, topic_date, run_id):
+    """Extract and durably stage every release found on one detail page.
+
+    Each release is committed immediately (rather than merged into an in-memory
+    dict for the caller to persist later) so a timeout mid-detail-crawl loses at
+    most the release currently in flight, not everything found so far. Returns
+    the number of releases extracted (staged or merged into an already-staged one).
+    """
     logger.info('Opening detail page: %s', detail_url)
     detail_page = await context.new_page()
+    extracted = 0
+
+    def stage(rel):
+        nonlocal extracted
+        if not rel:
+            return
+        with SessionLocal.begin() as session:
+            if stage_release(session, run_id, rel):
+                session.execute(update(ScraperLog).where(ScraperLog.id == run_id)
+                                 .values(items_added=ScraperLog.items_added + 1))
+        extracted += 1
+        logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+
     try:
         response = await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=60000)
         if response is None or response.status >= 400:
             logger.warning('Detail page %s returned status %s', detail_url, response.status if response else 'None')
-            return
+            return extracted
         date = topic_date
         if not date:
             d_date_text = await field(detail_page, values.get('date_selector'), 'datetime')
@@ -341,9 +385,7 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
             for idx in range(await sub_rows.count()):
                 try:
                     rel = await extract_release(sub_rows.nth(idx), context, detail_page, values, topic_title, date)
-                    if rel:
-                        merge_release(releases, rel)
-                        logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                    stage(rel)
                 except Exception as e:
                     logger.warning('Detail row %d skipped on %s: %s', idx, detail_url, e)
         else:
@@ -356,25 +398,22 @@ async def scrape_detail_page(context, detail_url, values, topic_title, topic_dat
                 for idx in range(await d_rows.count()):
                     try:
                         rel = await extract_release(d_rows.nth(idx), context, detail_page, values, topic_title, date)
-                        if rel:
-                            merge_release(releases, rel)
-                            logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                        stage(rel)
                     except Exception as e:
                         logger.warning('Detail fallback row %d skipped on %s: %s', idx, detail_url, e)
             else:
                 for idx in range(d_count):
                     try:
                         rel = await extract_release(downloads.nth(idx), context, detail_page, values, topic_title, date)
-                        if rel:
-                            merge_release(releases, rel)
-                            logger.info('Extracted release: %s (%s)', rel.get('title'), rel.get('category'))
+                        stage(rel)
                     except Exception as e:
                         logger.warning('Detail download link %d skipped on %s: %s', idx, detail_url, e)
     finally:
         await detail_page.close()
+    return extracted
 
 
-async def scrape_page_releases(page, context, values, releases, seen_detail_urls, origin, run_id):
+async def scrape_page_releases(page, context, values, seen_detail_urls, origin, run_id):
     try:
         await page.locator(values['row_selector']).first.wait_for(state='attached', timeout=30000)
     except PlaywrightTimeoutError:
@@ -386,6 +425,7 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
     if count > MAX_ROWS:
         raise ScrapeError(f"Page rows ({count}) exceeds the 2000-row limit.")
 
+    extracted_total = 0
     detail_sel = values.get('detail_selector')
     if detail_sel:
         for idx in range(count):
@@ -407,22 +447,40 @@ async def scrape_page_releases(page, context, values, releases, seen_detail_urls
             with SessionLocal.begin() as session:
                 session.execute(update(ScraperLog).where(ScraperLog.id == run_id).values(current_detail_url=detail_url))
             try:
-                await scrape_detail_page(context, detail_url, values, topic_title, topic_date, releases)
+                extracted_total += await scrape_detail_page(context, detail_url, values, topic_title, topic_date, run_id)
             except Exception as err:
                 # Allow scraping to continue if an individual topic page has issues.
                 logger.warning('Detail page skipped on %s: %s', detail_url, err)
+            # Only reached if the detail page attempt actually finished (success or the
+            # caught error above), not on a CancelledError from the worker timeout - an
+            # in-flight page whose extraction was aborted mid-way must not be marked
+            # done, or a resumed run would skip content it never actually reached.
+            with SessionLocal.begin() as session:
+                run = session.get(ScraperLog, run_id)
+                completed = completed_detail_urls(run)
+                completed.append(detail_url)
+                run.completed_detail_urls = json.dumps(completed)
+                run.current_detail_url = None
     else:
+        releases = {}
         for idx in range(count):
             rel = await extract_release(rows.nth(idx), context, page, values)
             merge_release(releases, rel)
+        with SessionLocal.begin() as session:
+            run = session.get(ScraperLog, run_id)
+            for rel in releases.values():
+                if stage_release(session, run_id, rel):
+                    run.items_added += 1
+        extracted_total = len(releases)
+    return extracted_total
 
 
 def resolve_run(values, fingerprint):
     """Reuse a matching in-progress run, abandon a stale one, or start fresh.
 
-    Returns (run_id, start_page, start_target, stale_torrent_paths). Abandoning a stale
-    run deletes its still-staged releases; their torrent filenames are returned for the
-    caller to unlink from disk (outside this transaction).
+    Returns (run_id, start_page, start_target, start_completed_detail_urls, stale_torrent_paths).
+    Abandoning a stale run deletes its still-staged releases; their torrent filenames are
+    returned for the caller to unlink from disk (outside this transaction).
     """
     target0 = http_url(values['target_url'])
     stale_torrent_paths = []
@@ -432,7 +490,8 @@ def resolve_run(values, fingerprint):
             .order_by(ScraperLog.id.desc()).limit(1))
         if candidate and candidate.config_fingerprint == fingerprint:
             candidate.status = 'running'
-            return candidate.id, candidate.current_page or 1, candidate.current_page_url or target0, stale_torrent_paths
+            return (candidate.id, candidate.current_page or 1, candidate.current_page_url or target0,
+                    completed_detail_urls(candidate), stale_torrent_paths)
         if candidate:
             finalize_run(candidate, 'failed', 'Superseded by configuration change')
             stale_torrent_paths = [path for (path,) in session.execute(
@@ -443,18 +502,18 @@ def resolve_run(values, fingerprint):
                           current_page_url=target0, config_fingerprint=fingerprint)
         session.add(run)
         session.flush()
-        return run.id, 1, target0, stale_torrent_paths
+        return run.id, 1, target0, [], stale_torrent_paths
 
 
 async def scrape(values):
     origin = urlsplit(http_url(values['target_url'])).netloc
     fingerprint = scrape_fingerprint(values)
-    run_id, start_page, target, stale_torrent_paths = resolve_run(values, fingerprint)
+    run_id, start_page, target, start_completed_detail_urls, stale_torrent_paths = resolve_run(values, fingerprint)
     for name in stale_torrent_paths:
         (TORRENT_DIR / name).unlink(missing_ok=True)
 
     seen_pages = set()
-    seen_detail_urls = set()
+    seen_detail_urls = set(start_completed_detail_urls)
     parsed_any = False
     user_agent = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36')
@@ -487,10 +546,9 @@ async def scrape(values):
                     if response.status >= 400:
                         raise ScrapeError(f"Target '{target}' returned HTTP status {response.status}.")
                     active_values = await inspect_and_auto_detect_selectors(page, values)
-                    page_releases = {}
-                    await scrape_page_releases(page, context, active_values, page_releases, seen_detail_urls, origin, run_id)
-                    parsed_any = parsed_any or bool(page_releases)
-                    logger.info('Found %d unique releases on page %d', len(page_releases), page_num)
+                    extracted = await scrape_page_releases(page, context, active_values, seen_detail_urls, origin, run_id)
+                    parsed_any = parsed_any or extracted > 0
+                    logger.info('Found %d unique releases on page %d', extracted, page_num)
                     next_link = await field(page, active_values.get('next_selector'), 'href')
                     next_target = None
                     if next_link:
@@ -498,15 +556,11 @@ async def scrape(values):
                         if urlsplit(next_target).netloc != origin:
                             raise ScrapeError('Pagination must remain on the configured host.')
                     with SessionLocal.begin() as session:
-                        added_this_page = 0
-                        for digest, data in page_releases.items():
-                            if session.get(Release, digest) is None:
-                                session.add(Release(**data, status='staged', run_id=run_id))
-                                added_this_page += 1
                         run = session.get(ScraperLog, run_id)
                         run.current_page = page_num + 1
                         run.current_page_url = next_target
-                        run.items_added += added_this_page
+                        run.current_detail_url = None
+                        run.completed_detail_urls = None
                     if not next_target:
                         break
                     target = next_target
@@ -528,7 +582,7 @@ async def scrape(values):
         message = format_scrape_error(exc)
         with SessionLocal.begin() as session:
             run = session.get(ScraperLog, run_id)
-            finalize_run(run, 'partial' if (run.current_page or 1) > 1 else 'failed', message)
+            finalize_run(run, 'partial' if run_has_progress(run) else 'failed', message)
         raise
 
 
@@ -559,7 +613,7 @@ class ScraperWorker:
                     elif run.status == 'running':
                         # scrape() was cancelled (e.g. the timeout below) before it could
                         # finalize its own row; it was left checkpointed mid-run.
-                        finalize_run(run, 'partial' if (run.current_page or 1) > 1 else 'failed', message)
+                        finalize_run(run, 'partial' if run_has_progress(run) else 'failed', message)
                 await asyncio.to_thread(notify_failure, message)
             finally:
                 with SessionLocal.begin() as session:

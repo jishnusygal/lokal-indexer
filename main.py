@@ -108,6 +108,7 @@ MIGRATED_COLUMNS = {
         ('current_page', 'INTEGER'),
         ('current_page_url', 'TEXT'),
         ('current_detail_url', 'TEXT'),
+        ('completed_detail_urls', 'TEXT'),
         ('config_fingerprint', 'VARCHAR'),
         ('ended_at', 'DATETIME'),
     ],
